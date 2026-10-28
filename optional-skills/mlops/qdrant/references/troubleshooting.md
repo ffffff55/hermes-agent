@@ -132,21 +132,38 @@ client = QdrantClient(
 
 **Error**: `ValueError: Collection 'documents' already exists`
 
-**Fix**:
+**Fix**: Inspect and reuse a compatible existing collection; create only when
+absent. An already-exists error is not a reason to erase data. This example uses
+one unnamed dense vector:
+
 ```python
-# Check before creating
-collections = client.get_collections().collections
-names = [c.name for c in collections]
+from qdrant_client.models import Distance, VectorParams
 
-if "documents" not in names:
-    client.create_collection(...)
+collection_name = "documents"
+expected = VectorParams(size=384, distance=Distance.COSINE)
 
-# Or recreate
-client.recreate_collection(
-    collection_name="documents",
-    vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-)
+if not client.collection_exists(collection_name=collection_name):
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=expected,
+    )
+
+info = client.get_collection(collection_name=collection_name)
+vectors = info.config.params.vectors
+if isinstance(vectors, dict):
+    raise ValueError("Named vectors: select and check the intended vector before reuse.")
+if vectors is None or vectors.size != expected.size or vectors.distance != expected.distance:
+    raise ValueError("Incompatible vector configuration; inspect the encoder or migrate to a new collection.")
+# Configuration matches: reuse only with the embedding model used for stored vectors.
 ```
+
+Matching size and distance alone does not prove that two embedding models share
+an embedding space. Confirm the intended server, collection, vector name and
+embedding model before reads or writes. For named vectors, inspect the selected
+entry rather than treating the configuration dictionary as a single vector.
+If another writer creates the collection between the existence check and create,
+stop and re-read its configuration; do not fall back to deleting or recreating it.
+Connection, permission and other errors must not be treated as collection absence.
 
 ### Collection Not Found
 
@@ -169,17 +186,67 @@ except Exception as e:
 
 **Error**: `ValueError: Vector dimension mismatch. Expected 384, got 768`
 
-**Fix**:
-```python
-# Check collection config
-info = client.get_collection("documents")
-print(f"Expected dimension: {info.config.params.vectors.size}")
+**Fix**: First check the configured vector and the encoder producing the failing
+query or upsert. This diagnostic only reads the collection:
 
-# Recreate with correct dimension
-client.recreate_collection(
-    collection_name="documents",
-    vectors_config=VectorParams(size=768, distance=Distance.COSINE)  # Match your embeddings
-)
+```python
+info = client.get_collection(collection_name="documents")
+vectors = info.config.params.vectors
+vector_name = None  # For named vectors, set the actual name used by the request.
+if isinstance(vectors, dict):
+    if vector_name not in vectors:
+        raise ValueError("Select an existing vector name from the collection configuration.")
+    vectors = vectors[vector_name]
+elif vector_name is not None:
+    raise ValueError("This collection uses an unnamed vector.")
+if vectors is None:
+    raise ValueError("No dense vector configuration; inspect the collection and request type.")
+
+# embedding is the actual dense vector from the failing request, not a new test vector.
+print(f"Expected dimension: {vectors.size}; request dimension: {len(embedding)}")
+if len(embedding) != vectors.size:
+    raise ValueError("Dimension mismatch: correct the encoder/model or migrate; do not reset the collection.")
+```
+
+- If the wrong encoder/model or output-dimension setting produced the request,
+  restore the configuration used for the stored vectors and regenerate the
+  affected query/upsert embeddings. Do not truncate or pad vectors to hide the error.
+- If intentionally changing embedding models or dimensions, create a collection
+  under a **new, unused name** with the intended size and distance. Regenerate
+  embeddings from the source documents using the new model, and populate it while
+  retaining point IDs and payloads. Do not copy old incompatible vectors. Validate
+  completeness and representative search results, then switch the application's
+  collection reference (or an existing alias) with a rollback path to the old
+  collection. Keep the old collection until the migration is verified.
+- Do not use `update_collection` to resize an existing vector. Updating supported
+  index/storage parameters is different from changing vector size. Newer versions
+  may support adding a new named vector, but that is not an in-place resize or
+  automatic re-embedding; verify both server and client version support before
+  choosing that alternative. No such capability is assumed by these examples.
+
+### Intentional Destructive Reset (Not a Troubleshooting Default)
+
+Use only when erasing this exact collection is intended: its data is disposable
+or a verified recovery source is available, and affected users/writers are
+coordinated. `recreate_collection` is deprecated in qdrant-client 1.14; the
+replacement below is equally destructive (points, payloads, payload indexes and
+non-default settings are lost; it is not a data-preserving fix). The calls are
+not atomic: if deletion succeeds but creation fails, the collection stays absent.
+Recreate required indexes/configuration and reload data deliberately; a blank
+collection is not recovery. This minimal example uses one unnamed dense vector:
+
+```python
+from qdrant_client.models import Distance, VectorParams
+
+collection_name = "documents"
+if client.collection_exists(collection_name=collection_name):
+    if not client.delete_collection(collection_name=collection_name):
+        raise RuntimeError("Delete not confirmed; stop and inspect state before retrying.")
+if not client.create_collection(
+    collection_name=collection_name,
+    vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+):
+    raise RuntimeError("Create not confirmed; inspect state and use the recovery plan.")
 ```
 
 ## Search Issues
