@@ -1625,6 +1625,12 @@ provider_routing:
 
 **Shortcuts:** Append `:nitro` to any model name for throughput sorting (e.g., `anthropic/claude-sonnet-4:nitro`), or `:floor` for price sorting. Per-model details: [Provider Routing](../user-guide/features/provider-routing.md#per-model-overrides-models).
 
+### Session stickiness
+
+**Session stickiness with `openrouter/auto`.** Every request Hermes sends to OpenRouter carries a top-level `session_id` derived from the current Hermes session (declared routing scope first, then the ambient conversation root). OpenRouter uses it to keep the Auto Router on the model a conversation landed on and to keep requests on the same provider for prompt caching. The router still re-ranks on every turn, so the served model may change when the conversation shifts task — and a mid-turn switch costs a prompt-cache miss. There is no config option to disable or override this; `model.extra_body.session_id` must not be set (it would apply one static value to every chat). To inspect which model actually served a request, use the `response.model` field OpenRouter returns (Hermes exposes it to the [`post_api_request`](../user-guide/features/hooks.md#post_api_request) lifecycle hook as `response_model`).
+
+The key is per session — one key per Telegram chat, CLI session, or cron job — not per user and not global. See OpenRouter's [Auto Router session stickiness](https://openrouter.ai/docs/guides/routing/routers/auto-router#session-stickiness).
+
 ## OpenRouter Pareto Code Router
 
 OpenRouter ships an experimental coding-model router at `openrouter/pareto-code` that auto-routes requests to the cheapest model meeting a coding-quality bar (ranked by [Artificial Analysis](https://artificialanalysis.ai/)). Pick this model and tune the `min_coding_score` knob in `~/.hermes/config.yaml`:

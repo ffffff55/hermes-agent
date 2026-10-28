@@ -1321,6 +1321,12 @@ provider_routing:
 
 **快捷方式：** 在任意模型名称后附加 `:nitro` 进行吞吐量排序（如 `anthropic/claude-sonnet-4:nitro`），或附加 `:floor` 进行价格排序。
 
+### 会话粘性
+
+**`openrouter/auto` 的会话粘性。** Hermes 发给 OpenRouter 的每个请求都携带顶层 `session_id`，取自当前 Hermes 会话（先用已声明的路由作用域，再用当前对话的根）。OpenRouter 用它让 Auto Router 继续使用该对话上次落到的模型，并让请求留在同一提供商上以便提示词缓存。路由器仍会在每一轮重新排序，因此当对话切换任务时，实际服务的模型可能变化——轮次中途切换会造成一次提示词缓存未命中。没有配置项可以关闭或覆盖这一点；不要设置 `model.extra_body.session_id`（一个静态值会套到每一次对话上）。要查看实际服务了某次请求的模型，使用 OpenRouter 返回的 `response.model` 字段（Hermes 在 [`post_api_request`](../user-guide/features/hooks.md#post_api_request) 生命周期钩子中以 `response_model` 暴露它）。
+
+该键按会话划分——每个 Telegram 聊天、CLI 会话或 cron 任务各一把，不是按用户，也不是全局。参见 OpenRouter 的 [Auto Router 会话粘性](https://openrouter.ai/docs/guides/routing/routers/auto-router#session-stickiness)。
+
 ## OpenRouter Pareto Code 路由器
 
 OpenRouter 提供一个实验性编程模型路由器 `openrouter/pareto-code`，自动将请求路由到满足编程质量标准的最便宜模型（按 [Artificial Analysis](https://artificialanalysis.ai/) 排名）。选择此模型并在 `~/.hermes/config.yaml` 中调整 `min_coding_score` 参数：
