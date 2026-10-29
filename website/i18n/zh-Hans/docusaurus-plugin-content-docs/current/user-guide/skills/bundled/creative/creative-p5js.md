@@ -198,8 +198,8 @@ p5.js 草图：生成艺术、着色器、交互、3D。
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Project Name</title>
-  <script>p5.disableFriendlyErrors = true;</script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+  <script>p5.disableFriendlyErrors = true;</script>
   <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/addons/p5.sound.min.js"></script> -->
   <!-- <script src="https://unpkg.com/p5.js-svg@1.6.0"></script> -->  <!-- SVG export -->
   <!-- <script src="https://cdn.jsdelivr.net/npm/ccapture.js-npmfixed/build/CCapture.all.min.js"></script> -->  <!-- video capture -->
@@ -462,7 +462,7 @@ new p5(sketch, 'canvas-container');
 ### WebGL 模式注意事项
 
 - `createCanvas(w, h, WEBGL)` — 原点在中心，而非左上角
-- Y 轴反转（WEBGL 中正 Y 向上，P2D 中向下）
+- 默认情况下，WEBGL 和 P2D 中的正 Y 都向下；WEBGL 的原点位于画布中心。
 - 使用 `translate(-width/2, -height/2)` 获得类似 P2D 的坐标
 - 每次变换前后都要使用 `push()`/`pop()` — 矩阵栈会静默溢出
 - `texture()` 在 `rect()`/`plane()` 之前调用——而非之后
