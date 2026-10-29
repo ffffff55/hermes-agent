@@ -489,20 +489,37 @@ for product in products:
 
 ### Caching Generators
 
+This example uses Outlines v1, Pydantic v2 and Transformers. Do not mutate a
+schema class after caching it; define a new class for a changed schema.
+
 ```python
 from functools import lru_cache
+from pydantic import BaseModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import outlines
+
+class User(BaseModel):
+    name: str
+    age: int
+    email: str
 
 @lru_cache(maxsize=10)
-def get_generator(model_name: str, schema_hash: int):
-    """Cache generators for reuse."""
-    model = outlines.models.transformers(model_name)
-    return outlines.generate.json(model, schema)
+def get_generator(model_name: str, schema_type: type[BaseModel]):
+    """Bind the exact schema class in the cache key to the generator."""
+    model = outlines.from_transformers(
+        AutoModelForCausalLM.from_pretrained(model_name),
+        AutoTokenizer.from_pretrained(model_name),
+    )
+    return outlines.Generator(model, schema_type)
 
-# First call: creates generator
-gen1 = get_generator("microsoft/Phi-3-mini-4k-instruct", hash(User))
-
-# Second call: returns cached generator (fast!)
-gen2 = get_generator("microsoft/Phi-3-mini-4k-instruct", hash(User))
+# Same model and schema reuse the generator; a different schema gets its own.
+gen1 = get_generator("microsoft/Phi-3-mini-4k-instruct", User)
+gen2 = get_generator("microsoft/Phi-3-mini-4k-instruct", User)
+assert gen1 is gen2
+# v1 returns JSON text; validate it explicitly when consuming the output.
+user = User.model_validate_json(
+    gen1("Generate user: Alice, 25, alice@example.com", max_new_tokens=200)
+)
 ```
 
 ### Batch Processing
@@ -556,16 +573,33 @@ except ValidationError as e:
 
 ### Fallback with Optional Fields
 
+This standalone example uses Outlines v1 and Pydantic v2. Declaring optional
+fields does not change an existing generator: bind the new schema explicitly.
+Missing optional fields receive defaults during validation, not from a promise
+that generation omits them. Schema validity does not establish factual accuracy.
+
 ```python
+from typing import Optional
+from pydantic import BaseModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import outlines
+
 class RobustUser(BaseModel):
     name: str  # Required
-    age: Optional[int] = None  # Optional
-    email: Optional[str] = None  # Optional
+    age: Optional[int] = None
+    email: Optional[str] = None
 
-# More likely to succeed even with incomplete data
-user = generator("Generate user: Alice")
-print(user.name)  # "Alice"
-print(user.age)  # None (not provided)
+model_name = "microsoft/Phi-3-mini-4k-instruct"
+robust_model = outlines.from_transformers(
+    AutoModelForCausalLM.from_pretrained(model_name),
+    AutoTokenizer.from_pretrained(model_name),
+)
+robust_generator = outlines.Generator(robust_model, RobustUser)
+user = RobustUser.model_validate_json(
+    robust_generator("Generate user: Alice", max_new_tokens=200)
+)
+print(user.name)
+print(user.age)  # None if omitted or null in the generated JSON
 ```
 
 ## Best Practices
