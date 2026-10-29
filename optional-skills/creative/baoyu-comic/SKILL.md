@@ -134,7 +134,7 @@ Comic Progress:
 - [ ] Step 1: Setup & Analyze
   - [ ] 1.1 Analyze content
   - [ ] 1.2 Check existing directory
-- [ ] Step 2: Confirmation - Style & options ⚠️ REQUIRED
+- [ ] Step 2: Resolve remaining material style/options choices (reuse explicit preferences)
 - [ ] Step 3: Generate storyboard + characters
 - [ ] Step 4: Review outline (conditional)
 - [ ] Step 5: Generate prompts
@@ -148,7 +148,7 @@ Comic Progress:
 ### Flow
 
 ```
-Input → Analyze → [Check Existing?] → [Confirm: Style + Reviews] → Storyboard → [Review?] → Prompts → [Review?] → Images → Complete
+Input → Analyze → [Check Existing?] → [Resolve remaining material choices] → Storyboard → [Review?] → Prompts → [Review?] → Images → Complete
 ```
 
 ### Step Summary
@@ -157,7 +157,7 @@ Input → Analyze → [Check Existing?] → [Confirm: Style + Reviews] → Story
 |------|--------|------------|
 | 1.1 | Analyze content | `analysis.md`, `source-{slug}.md` |
 | 1.2 | Check existing directory | Handle conflicts |
-| 2 | Confirm style, focus, audience, reviews | User preferences |
+| 2 | Resolve remaining material choices; reuse explicit preferences | Preferences and disclosed reversible defaults |
 | 3 | Generate storyboard + characters | `storyboard.md`, `characters/` |
 | 4 | Review outline (if requested) | User approval |
 | 5 | Generate prompts | `prompts/*.md` |
@@ -168,15 +168,17 @@ Input → Analyze → [Check Existing?] → [Confirm: Style + Reviews] → Story
 
 ### User Questions
 
-Use the `clarify` tool to confirm options. Put independent questions in one `questions` array (up to 5); ask separately any question whose options depend on an earlier answer. See [references/workflow.md](references/workflow.md) for the full Step 2 question set.
+Reuse explicit user/accepted preferences; ask only unresolved material choices and disclose reasonable reversible defaults. The reference question set is a menu, not five mandatory questions. Preserve a requested outline/prompt review and the separate route/cost/rights gate.
 
 **Timeout handling (CRITICAL)**: `clarify` can return `"outcome": "timed_out"` with responses marked `"status": "unanswered"` — this is NOT user consent to default everything.
 
-- Treat it as a default **for the unanswered questions only**. Each question is an independent consent point.
+- For unanswered reversible creative choices, disclose a reasonable default only when the brief leaves it open. An unanswered question is not consent for a requested review, cost, rights or other authorization boundary.
 - **Surface the default to the user visibly** in your next message so they have a chance to correct it: e.g. `"Style: defaulted to ohmsha preset (clarify timed out). Say the word to switch."` — an unreported default is indistinguishable from never having asked.
-- Do NOT collapse Step 2 into a single "use all defaults" pass after one timeout. If the user is genuinely absent, they will be equally absent for all five questions — but they can correct visible defaults when they return, and cannot correct invisible ones.
+- Ask only the unresolved material questions, not all five by default. Reuse explicit preferences, disclose any reversible creative defaults, and preserve a requested review or independent route/cost/rights gate regardless of timeout.
 
 ### Step 7: Image Generation
+
+Before rendering, verify the intended route, applicable rights and any spending authorization. Creative defaults or a timed-out question do not grant that authorization; do not switch to a paid route without it.
 
 Use Hermes' built-in `image_generate` tool for all image rendering. Its schema accepts only `prompt` and `aspect_ratio` (`landscape` | `portrait` | `square`); it **returns a URL**, not a local file. Every generated page or character sheet must therefore be downloaded to the output directory.
 
@@ -241,7 +243,7 @@ Full step-by-step workflow (analysis, storyboard, review gates, regeneration var
 - **Always download** the URL returned by `image_generate` to a local PNG — downstream tooling (and the user's review) expects files in the output directory, not ephemeral URLs
 - **Use absolute paths for `curl -o`** — never rely on persistent-shell CWD across batches. Silent footgun: files land in the wrong directory and subsequent `ls` on the intended path shows nothing. See Step 7 "Download step".
 - Use stylized alternatives for sensitive public figures
-- **Step 2 confirmation required** - do not skip
-- **Steps 4/6 conditional** - only if user requested in Step 2
+- **Step 2** resolves only remaining material choices; do not repeat explicit preferences or add an unrequested review gate.
+- **Steps 4/6 conditional** - honor outline/prompt reviews specified in the accepted request, regardless of when they were requested.
 - **Step 7.1 character sheet** - recommended for multi-page comics, optional for simple presets. The PNG is a review/regeneration aid; page prompts (written in Step 5) use the text descriptions in `characters/characters.md`, not the PNG. `image_generate` does not accept images as visual input
 - **Strip secrets** — scan source content for API keys, tokens, or credentials before writing any output file

@@ -11,7 +11,7 @@ Comic Progress:
 - [ ] Step 1: Setup & Analyze
   - [ ] 1.1 Analyze content
   - [ ] 1.2 Check existing ⚠️ REQUIRED
-- [ ] Step 2: Confirmation - Style & options ⚠️ REQUIRED
+- [ ] Step 2: Resolve remaining material style/options choices (reuse explicit preferences)
 - [ ] Step 3: Generate storyboard + characters
 - [ ] Step 4: Review outline (conditional)
 - [ ] Step 5: Generate prompts
@@ -25,7 +25,7 @@ Comic Progress:
 ## Flow Diagram
 
 ```
-Input → Analyze → [Check Existing?] → [Confirm: Style + Reviews] → Storyboard → [Review Outline?] → Prompts → [Review Prompts?] → Images → Complete
+Input → Analyze → [Check Existing?] → [Resolve remaining material choices] → Storyboard → [Review Outline?] → Prompts → [Review Prompts?] → Images → Complete
 ```
 
 ---
@@ -85,9 +85,9 @@ Save result and handle accordingly:
 
 ---
 
-## Step 2: Confirmation - Style & Options ⚠️
+## Step 2: Resolve Remaining Style & Options Choices
 
-**Purpose**: Select visual style + decide whether to review outline before generation. **Do NOT skip.**
+**Purpose**: Resolve only material creative choices not already specified by the user or accepted brief. Reuse explicit style, narrative focus, audience and review preferences without asking again. For ordinary reversible choices, choose and disclose a reasonable default and continue. Ask only when unresolved ambiguity changes scope or when the user requested an outline/prompt review. Preserve the separate route/cost/rights gates in Step 7; a timed-out style question is not spending consent.
 
 **Display summary first**:
 - Content type + topic identified
@@ -97,9 +97,9 @@ Save result and handle accordingly:
 - Language (detected or user-specified)
 - **Recommended style**: [art] + [tone] (based on content signals)
 
-**Use `clarify` with the independent questions in one `questions` array**, in priority order:
+Use `clarify` only for unresolved material choices, with independent questions in one `questions` array. The questions below are a menu, not five mandatory repeated questions. Skip answers already explicit in the request/accepted brief; disclose reasonable reversible defaults and continue.
 
-> **Timeout handling (CRITICAL)**: if `clarify` returns `"outcome": "timed_out"`, every response marked `"status": "unanswered"` is a per-question default, NOT blanket consent — do not bail out of Step 2. Then, in your next user-visible message, explicitly surface every default that was taken (e.g. `"Defaulted style → ohmsha, narrative focus → concept explanation, audience → developers (clarify timed out on all three). Say the word to redirect."`). An unreported default is indistinguishable to the user from "the agent never asked."
+> **Timeout handling (CRITICAL)**: A timed-out or unanswered creative question is not consent. Reuse explicit preferences; disclose defaults only for open, reversible creative choices. Keep unresolved material scope choices open and wait for an explicitly requested outline/prompt review. Timeout never authorizes spending, rights use or a route that has not been authorized.
 
 ### Question 1: Visual Style
 
@@ -157,10 +157,10 @@ options:
   - "No, skip prompt review — Proceed directly to image generation"
 ```
 
-**After responses**:
-1. Update `analysis.md` with user preferences
-2. **Store `skip_outline_review`** flag based on Question 4 response
-3. **Store `skip_prompt_review`** flag based on Question 5 response
+**After resolving the necessary choices**:
+1. Update `analysis.md` with explicit preferences and disclosed defaults.
+2. Set `skip_outline_review` and `skip_prompt_review` from the accepted request; when no review was requested, continue without adding an approval gate.
+3. Respect an explicitly requested review and the independent Step 7 route/cost/rights boundary.
 4. → Step 3
 
 ---
@@ -209,7 +209,7 @@ These are the canonical ohmsha-style characters. Do NOT create custom characters
 
 ## Step 4: Review Outline (Conditional)
 
-**Skip this step** if user selected "No, generate directly" in Step 2.
+**Skip this step** when the accepted request does not ask for outline review; preserve any explicit request to review before continuing.
 
 **Purpose**: User reviews and confirms storyboard + characters before generation.
 
@@ -277,7 +277,7 @@ Art: [art style] | Tone: [tone] | Layout: [layout type]
 
 ## Step 6: Review Prompts (Conditional)
 
-**Skip this step** if user selected "No, skip prompt review" in Step 2.
+**Skip this step** when the accepted request does not ask for prompt review; preserve any explicit request to review before continuing.
 
 **Purpose**: User reviews and confirms prompts before image generation.
 
@@ -307,6 +307,8 @@ options:
 ---
 
 ## Step 7: Generate Images
+
+Before rendering, verify the intended route, applicable rights and any spending authorization. Creative defaults or a timed-out question do not grant that authorization; do not switch to a paid route without it.
 
 With confirmed prompts from Step 5/6, use the `image_generate` tool. The tool accepts only `prompt` and `aspect_ratio` (`landscape` | `portrait` | `square`) and **returns a URL** — it does not accept reference images and does not write local files. Every invocation must be followed by a download step.
 
