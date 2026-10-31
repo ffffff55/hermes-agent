@@ -3110,20 +3110,20 @@ def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> bool:
 def _retire_expired_oneshot(d: _DueJob) -> bool:
     """One-shot grace gate; True when the job must not fire this tick.
 
-    A one-shot beyond the grace window must never fire (create/update/resume reject such schedules
-    and recovery never revives them; only the due scan used to dispatch them hours late). With no
-    claim stamped, retire it with a diagnostic (never silently delete). A claim may mean a run is
-    still in flight elsewhere — skip but keep the record so its mark_job_run can land."""
+    Past grace, retire with the missed diagnostic unless a live run_claim or
+    fire_claim is in flight (#147102). Dead or TTL-expired claims count as
+    missing. Outage-covered dues, and outage claims with no fire_claim, still fire."""
     if _elapsed_seconds(d.scan.now, d.next_run_dt) <= ONESHOT_GRACE_SECONDS:
         return False
-    # Due during an outage of its store: it was skipped, not missed; fire it once on recovery.
     if store_health.outage_covers(_current_cron_store().cron_dir, d.next_run_dt.timestamp(), ONESHOT_GRACE_SECONDS):
         return False
     claim = d.job.get("run_claim")
-    # An outage-covered claim that never reached its fire claim never started: it stays covered.
     if isinstance(claim, dict) and claim.get("outage") and not d.job.get("fire_claim"):
         return False
-    if not (claim or d.job.get("fire_claim")):
+    if not (
+        _claim_is_live(claim, d.scan.now, _oneshot_run_claim_ttl_seconds())
+        or _claim_is_live(d.job.get("fire_claim"), d.scan.now, FIRE_CLAIM_TTL_SECONDS)
+    ):
         _write_missed_oneshot_diagnostic(d.job, d.next_run)
         d.scan.retire(d.job["id"])
         d.scan.on_saved.append(lambda job=d.job: record_cron_missed(job))
