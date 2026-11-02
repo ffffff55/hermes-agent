@@ -1154,9 +1154,15 @@ class SlackAdapter(BasePlatformAdapter):
                 closer = getattr(client, method_name, None)
                 if not callable(closer):
                     continue
-                result = closer()
-                if inspect.isawaitable(result):
-                    await result
+                try:
+                    result = closer()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    # One client's close must not skip the rest or the lock release.
+                    logger.debug(
+                        "[Slack] %s() failed while closing a workspace client",
+                        method_name, exc_info=True)
                 break
 
     @staticmethod
@@ -1903,26 +1909,64 @@ class SlackAdapter(BasePlatformAdapter):
                 parent_chat_id, exc)
         return None
 
+    async def _best_effort_disconnect_step(self, label: str, awaitable) -> None:
+        """Run one teardown step. A failure is logged and does not abort the rest."""
+        try:
+            await awaitable
+        except Exception:
+            logger.warning(
+                "[Slack] %s failed during disconnect", label, exc_info=True)
+
     async def disconnect(self) -> None:
-        """Disconnect from Slack."""
+        """Disconnect from Slack.
+
+        Each step is best-effort. ``finally`` releases the platform lock and
+        clears connection state when a step raises or this task is cancelled
+        while waiting on the Slack API (gateway bounded teardown).
+        """
         self._running = False
-        # Seal dangling native streams so no live-typing indicator survives a restart.
-        for key, stream in list(self._active_streams.items()):
-            await self._seal_stream(key, stream)
-        self._active_streams.clear()
-        # A watchdog that lost the cancel race must not block cleanup/lock release.
-        await self._cancel_socket_watchdog("[Slack] Watchdog task raised during disconnect")
-        # Finalize native streams while workspace clients are still live —
-        # shutdown safety net for cancellation/reconnect races.
-        for key, stream in list(self._native_task_card_streams.items()):
-            await self._stop_native_task_card_stream(key, stream)
-        await self._stop_socket_mode_handler()
-        await self._close_workspace_clients()
-        self._app = self._app_token = self._proxy_url = self._bot_user_id = None
-        self._team_clients, self._team_bot_user_ids = {}, {}
-        self._channel_team, self._dm_conversation_cache = {}, {}
-        self._release_platform_lock()
-        logger.info("[Slack] Disconnected")
+        seal_cancelled = False
+        try:
+            # Seal dangling streams so no live-typing indicator survives a restart.
+            for key, stream in list(self._active_streams.items()):
+                try:
+                    await self._seal_stream(key, stream)
+                except asyncio.CancelledError:
+                    # Bounded teardown cancels us inside chat.stopStream.
+                    # Finish the remaining steps; re-raise after the lock drops.
+                    seal_cancelled = True
+                    logger.debug(
+                        "[Slack] chat.stopStream cancelled during disconnect",
+                        exc_info=True)
+                except Exception:
+                    logger.warning(
+                        "[Slack] Failed to seal a native stream during disconnect",
+                        exc_info=True)
+            self._active_streams.clear()
+            # A watchdog that lost the cancel race must not block cleanup/lock release.
+            await self._best_effort_disconnect_step(
+                "cancel socket watchdog",
+                self._cancel_socket_watchdog(
+                    "[Slack] Watchdog task raised during disconnect"))
+            # Finalize native streams while workspace clients are still live —
+            # shutdown safety net for cancellation/reconnect races.
+            for key, stream in list(self._native_task_card_streams.items()):
+                await self._best_effort_disconnect_step(
+                    "stop native task-card stream",
+                    self._stop_native_task_card_stream(key, stream))
+            await self._best_effort_disconnect_step(
+                "stop Socket Mode", self._stop_socket_mode_handler())
+            await self._best_effort_disconnect_step(
+                "close workspace clients", self._close_workspace_clients())
+        finally:
+            self._active_streams.clear()
+            self._app = self._app_token = self._proxy_url = self._bot_user_id = None
+            self._team_clients, self._team_bot_user_ids = {}, {}
+            self._channel_team, self._dm_conversation_cache = {}, {}
+            self._release_platform_lock()
+            logger.info("[Slack] Disconnected")
+        if seal_cancelled:
+            raise asyncio.CancelledError
 
     @staticmethod
     def _metadata_team_id(metadata: Optional[dict[str, Any]]) -> str:
