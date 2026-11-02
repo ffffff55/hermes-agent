@@ -255,6 +255,41 @@ class TestWriteFileRoundTrips:
         assert len(calls) == 3
         assert p.read_bytes() == b"hi\n"
 
+    @pytest.mark.parametrize("lane", ["shell", "native"])
+    def test_existing_parent_is_not_reported_as_created(self, lane, request, tmp_path):
+        """Regression for #146410: an existing folder is not a directory this call made."""
+        ops, _calls = request.getfixturevalue(lane)
+        parent = tmp_path / "existing"
+        parent.mkdir()
+        (parent / "kept.txt").write_text("stay\n", encoding="utf-8")
+        target = parent / "note.md"
+        result = ops.write_file(str(target), "hi\n")
+        assert result.error is None
+        assert result.dirs_created is False
+        assert result.to_dict()["dirs_created"] is False
+        assert target.read_text(encoding="utf-8") == "hi\n"
+        assert (parent / "kept.txt").read_text(encoding="utf-8") == "stay\n"
+
+    @pytest.mark.parametrize("lane", ["shell", "native"])
+    def test_relative_write_into_existing_parent_is_not_created(self, lane, request, tmp_path):
+        """The parent is the backend cwd's directory, not the process cwd."""
+        ops, _calls = request.getfixturevalue(lane)
+        (tmp_path / "existing").mkdir()
+        result = ops.write_file("existing/note.md", "hi\n")
+        assert result.error is None and result.dirs_created is False
+        assert (tmp_path / "existing" / "note.md").read_text(encoding="utf-8") == "hi\n"
+
+    @pytest.mark.parametrize("lane", ["shell", "native"])
+    def test_created_parents_report_dirs_created(self, lane, request, tmp_path):
+        """Regression for #146410: a parent this call had to make is reported."""
+        ops, _calls = request.getfixturevalue(lane)
+        target = tmp_path / "brand" / "new" / "note.md"
+        result = ops.write_file(str(target), "hi\n")
+        assert result.error is None
+        assert result.dirs_created is True
+        assert result.to_dict()["dirs_created"] is True
+        assert target.read_text(encoding="utf-8") == "hi\n"
+
     def test_unparseable_probe_reply_falls_back_to_separate_probes(self, shell, tmp_path):
         ops, _calls = shell
         p = tmp_path / "crlf.txt"

@@ -1552,9 +1552,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             content = _normalize_line_endings(content, "\r\n")
         if has_bom and not _has_bom(content):
             content = _UTF8_BOM + content
-        # ``dirs_created`` means "parent dirs ensured" (mkdir -p is folded into
-        # _atomic_write; its failure surfaces as the atomic-write error below).
-        dirs_created = bool(os.path.dirname(path))
+        # ``dirs_created`` means this call created a parent directory, not that
+        # the path has one. Sample existence before _atomic_write: its mkdir -p
+        # leaves the parent in place, so a later check cannot tell a new folder
+        # from one that was already there. Resolve like the write (backend cwd
+        # for a relative path); judging against the process cwd reports an
+        # existing folder as created. A bare filename has no parent to make.
+        parent = os.path.dirname(self._native_path(path))
+        existed = os.path.isdir(parent) if parent else True
         # surrogateescape is the exact inverse of the decode that may have produced
         # this content, so these are the bytes on disk; the early rejection above
         # guarantees this cannot raise.
@@ -1573,6 +1578,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         if lint_result.success or lint_result.skipped:
             lsp_diagnostics = self._maybe_lsp_diagnostics(
                 path, pre_content=pre_content, post_content=content, started=started) or None
+        dirs_created = bool(parent) and not existed
         return WriteResult(
             bytes_written=len(content_bytes), dirs_created=dirs_created, verified=content_verified,
             _content_sha256=hashlib.sha256(content_bytes).hexdigest(),
