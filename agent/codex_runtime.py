@@ -870,6 +870,31 @@ def _output_text_of(item: Any) -> str:
     ).strip()
 
 
+def _json_text_complete(text: str) -> bool:
+    """True when ``text`` is one complete JSON value (``json.loads`` succeeds)."""
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _arguments_after_done(accumulated: str, done_args: Any) -> str:
+    """Choose the argument string for a ``function_call_arguments.done`` event.
+
+    ``.done.arguments`` wins when it is complete JSON. An explicit ``""`` stays
+    the zero-arg call. A truncated payload must not replace deltas that already
+    parse (#148158). When neither side parses, the done value is kept so the
+    existing error path still sees it — this does not repair JSON.
+    """
+    done_text = str(done_args)
+    # Explicit "" is the zero-arg call (not valid JSON, but still authoritative).
+    done_ok = done_text == "" or _json_text_complete(done_text)
+    if done_ok or not _json_text_complete(accumulated):
+        return done_text
+    return accumulated
+
+
 class _CodexResponseAssembler:
     """Assemble a Response-shaped ``SimpleNamespace`` from raw Responses SSE events.
 
@@ -987,10 +1012,11 @@ class _CodexResponseAssembler:
         if "delta" in event_type:
             pending["arguments"] += _event_field(event, "delta", "") or ""
         elif event_type.endswith("function_call_arguments.done"):
-            # Authoritative for the accumulated string; an explicit "" (zero-arg call) counts, only a
-            # missing field keeps the streamed deltas.
+            # A missing field keeps the streamed deltas. A present payload replaces
+            # them only when it parses (or is the explicit zero-arg ""); a truncated
+            # ``.done.arguments`` must not clobber deltas that already form JSON.
             if (done_args := _event_field(event, "arguments", None)) is not None:
-                pending["arguments"] = str(done_args)
+                pending["arguments"] = _arguments_after_done(pending["arguments"], done_args)
 
     def _on_reasoning_delta(self, event: Any, event_type: str) -> None:
         reasoning_text = _event_field(event, "delta", "")
