@@ -93,7 +93,8 @@ async def prepare_compress(authority, live, payload, prepared):
     # The same report every native /compress prints ("Compressed: N → M messages").
     from agent.manual_compression_feedback import summarize_manual_compression
     if compressed is None:
-        if resident is None and not isinstance(compressor, ContextCompressor):
+        # Exact class: a one-off plugin that subclasses ContextCompressor still ends here (#147875).
+        if resident is None and type(compressor) is not ContextCompressor:
             await asyncio.to_thread(_end_engine, compressor, snapshot['target'], messages)
         # Nothing removable (a short session keeps every message): main's read-only
         # "No changes from compression" report, estimated like main's (system prompt + tools).
@@ -111,7 +112,8 @@ async def prepare_compress(authority, live, payload, prepared):
     # with boundary_reason="compression"), as the agent path does after its own commit.
     engine_owner = SimpleNamespace(context_compressor=compressor, platform=_platform(live.source),
                                    _gateway_session_key=live.route,
-                                   owned=resident is None and not isinstance(compressor, ContextCompressor))
+                                   # Same exact-class test as the noop release above (#147875).
+                                   owned=resident is None and type(compressor) is not ContextCompressor)
     return dict(prepared, messages=compressed, summary=summary, post_compaction=hook, engine_owner=engine_owner,
                 in_place=is_truthy_value(options.get('in_place'), default=True))
 
@@ -167,11 +169,13 @@ def _plugin_engine(authority, policy, config, model, runtime, resident, target):
 
     A resident agent's engine is the one bound to this session. A cold or managed-worker session
     gets the engine its frozen policy names, selected and bound the way agent init does, so a
-    plugin engine compresses its own history instead of having it rewritten underneath it."""
+    plugin engine compresses its own history instead of having it rewritten underneath it.
+    Only the exact ``ContextCompressor`` class is built-in; a plugin subclass still runs."""
     from agent.context_compressor import ContextCompressor
     if resident is not None:
         engine = getattr(resident, 'context_compressor', None)
-        return None if engine is None or isinstance(engine, ContextCompressor) else engine
+        # Exact class, not isinstance: a plugin may subclass ContextCompressor (#147875).
+        return None if engine is None or type(engine) is ContextCompressor else engine
     if policy.safe_mode:
         return None
     from agent.agent_init import _select_context_engine
