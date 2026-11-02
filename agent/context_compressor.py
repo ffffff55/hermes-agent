@@ -39,7 +39,7 @@ from agent.context_compressor_prompt_rules import EPISTEMIC_STANCE_RULE, UNVERIF
 from agent.context_compressor_retry import retryable_user_text, typed_prompt_content
 from agent.context_compressor_tail import (
     demote_stale_tail_tools, lean_tail_budget, is_demoted_stub, skill_view_names_by_call_id, tail_cut_pricer,
-    elide_keeping_skill_safety_rule, with_skill_safety_rule, without_skill_safety_rule, tail_cut_progress_floor,
+    elide_keeping_skill_safety_rule, with_skill_safety_rule, without_skill_safety_rule, tail_cut_after_anchors,
 )
 from agent.context_compressor_telemetry import CompressionTelemetryMixin
 from agent.error_classifier import FailoverReason, classify_api_error
@@ -5043,7 +5043,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             # (whole session under the budget) anchors for free, so the exception must not fire.
             # Measured with the walk's own accounting (#84371), not a second thought-charge rule.
             and self._walk_tail_budget(
-                messages, user_anchored_cut, soft_ceiling, 0, cut_at_break=False
+                messages, user_anchored_cut, soft_ceiling, 0, cut_at_break=False, price=price,
             )[0] > user_anchored_cut
         ):
             split_oversized_turn = True
@@ -5092,7 +5092,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         # Floor guarantees progress (>= 1 non-handoff message claimed); re-align FORWARD only so a raised cut
         # can't split a tool group (backward would give the floor's message back).
-        return min(n, self._align_boundary_forward(messages, max(cut_idx, tail_cut_progress_floor(self, messages, head_end, cut_idx))))
+        return min(n, self._align_boundary_forward(messages, tail_cut_after_anchors(self, messages, head_end, cut_idx)))
 
     def has_content_to_compress(self, messages: list[dict[str, Any]]) -> bool:
         """True if a non-empty middle region exists (lets the gateway ``/compress`` guard skip the LLM call)."""

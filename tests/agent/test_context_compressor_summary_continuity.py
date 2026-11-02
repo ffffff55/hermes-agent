@@ -492,3 +492,44 @@ def test_fallback_handoff_anchors_reach_the_next_summarizer():
 
     prompt = mock_call.call_args.kwargs["messages"][0]["content"]
     assert "FALLBACK-ANCHOR-ASK" in prompt
+
+
+def test_handoff_only_window_is_not_left_unchanged():
+    """A leading handoff with the only real user on the next row must still compress.
+
+    Regression for #147853. The user anchor pins the cut on that ask, so the
+    summarizer window is the handoff alone and compress() used to no-op with
+    ``empty_post_handoff_window``. Rows after the ask are not further user
+    turns — another real user would move the anchor and hide the bug. The
+    trailing tool result keeps the ask in flight, so it stays in the tail.
+    """
+    cc = _compressor()
+    handoff = {
+        "role": "user",
+        "content": f"{SUMMARY_PREFIX}\n" + " ".join(["earlier"] * 1800),
+        COMPRESSED_SUMMARY_METADATA_KEY: True,
+    }
+    real_user = {"role": "user", "content": "the active ask"}
+    def _call(call_id: str) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+
+    messages = [
+        handoff,
+        real_user,
+        {"role": "assistant", "content": "", "tool_calls": [_call("call-1")]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "file body " * 40},
+        {"role": "assistant", "content": "", "tool_calls": [_call("call-2")]},
+        {"role": "tool", "tool_call_id": "call-2", "content": "more body " * 20},
+    ]
+
+    with patch.object(cc, "_generate_summary", return_value="NEW SUMMARY BODY"):
+        result = cc.compress(messages, current_tokens=60_000)
+
+    telemetry = cc._last_compression_telemetry or {}
+    assert telemetry.get("failure_class") != "empty_post_handoff_window"
+    assert cc._last_compression_made_progress is True
+    assert any("the active ask" in str(m.get("content") or "") for m in result)

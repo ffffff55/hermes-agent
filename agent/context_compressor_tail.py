@@ -153,6 +153,53 @@ def tail_cut_progress_floor(compressor: Any, messages: list[dict[str, Any]], hea
     return floor if raised >= len(messages) or 0 <= last_user < raised else raised
 
 
+def widen_handoff_only_cut(compressor: Any, messages: list[dict[str, Any]], head_end: int, cut_idx: int) -> int:
+    """Include the next non-handoff row when the planned window is only handoffs.
+
+    The user anchor can pin the cut on the one real user that follows a leading
+    handoff (``head_end == 0``, user at index 1). The window is then that
+    handoff alone, the handoff scan strips it, and compress() no-ops with
+    ``empty_post_handoff_window``. Extend the cut to the next non-handoff row
+    so the summarizer has material.
+
+    A newer real user that is still ahead of the cut stays in the tail when
+    stopping there still leaves a non-handoff row (#10896). When that user
+    *is* the boundary, the following row is the only material available; an
+    in-flight ask is restated after the handoff, so the active request remains
+    in the tail. Nothing to widen to (a single handoff row) stays a no-op.
+    """
+    n = len(messages)
+    if cut_idx > head_end + 1 or not all(
+        compressor._is_context_summary_message(m) for m in messages[head_end:cut_idx]
+    ):
+        return cut_idx
+    last_user = compressor._find_last_user_message_idx(messages, head_end)
+    for j in range(cut_idx + 1, n):
+        if compressor._is_context_summary_message(messages[j]):
+            continue
+        proposed = j + 1
+        # A later real user is still protected. Land on it when the rows
+        # before it are real material; otherwise this row is the only one
+        # the window can gain.
+        if last_user > cut_idx and proposed > last_user and any(
+            not compressor._is_context_summary_message(messages[i]) for i in range(cut_idx, last_user)
+        ):
+            return last_user
+        return proposed
+    return cut_idx
+
+
+def tail_cut_after_anchors(compressor: Any, messages: list[dict[str, Any]], head_end: int, cut_idx: int) -> int:
+    """Post-anchor tail cut: the progress floor, then a handoff-only widen.
+
+    The floor refuses to take the active request out of the tail, so a user
+    sitting immediately after the handoff leaves a window the summarizer
+    cannot use. The widen covers that case without undoing a floor that
+    already claimed a real row."""
+    raised = max(cut_idx, tail_cut_progress_floor(compressor, messages, head_end, cut_idx))
+    return widen_handoff_only_cut(compressor, messages, head_end, raised)
+
+
 def with_skill_safety_rule(
     summary: str, head: list[dict[str, Any]], tail: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
