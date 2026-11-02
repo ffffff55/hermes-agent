@@ -95,6 +95,15 @@ def legacy_launch_params(row):
         # an endpoint left without a provider is a custom route, never one to pair with the
         # profile's provider.
         route.setdefault('provider', 'custom')
+    # A registry pseudo-endpoint (moa://local, process://...) is the provider's own
+    # identity, not a launch URL. Forwarding it makes session.resume refuse
+    # invalid_params on base_url (#147676). Strip it only after the billing
+    # fallback, and only when a real provider can resolve the route: a bare
+    # custom endpoint is still the route, and the launch validator stays strict.
+    if (isinstance(route.get('base_url'), str)
+            and route['base_url'].split(':', 1)[0].lower() not in ('http', 'https')
+            and str(route.get('provider') or '').strip() not in ('', 'custom')):
+        route.pop('base_url')
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})
