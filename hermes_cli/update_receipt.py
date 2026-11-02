@@ -1108,11 +1108,68 @@ EXTERNAL_STATE = "external"
 # A gateway this updater runs INSIDE that accepted a self-restart request: it is still on the
 # pre-update code by construction and restarts once the updater exits (#100179 / #119597).
 RESTART_PENDING_STATE = "restart_pending"
+# Identify's session descriptor stamps these; ``profile_id`` is the authority home path,
+# the same value as ``home``. ``name`` is only a fallback for a record that carries one.
+_SERVED_PROFILE_STAMP_KEYS = ("profile_id", "home", "name")
 
 
 def row_is_external(row: Any) -> bool:
     """Whether a fleet row serves a checkout this update did not touch."""
     return isinstance(row, dict) and row.get("state") == EXTERNAL_STATE
+
+
+def _profile_name_from_stamp(value: str) -> Optional[str]:
+    """Profile name ``_fleet_covered_gateways`` matches, or None.
+
+    A bare id (``default``, ``coder``) is already that name. Identify stamps the
+    profile home path in ``profile_id`` and ``home`` (``SessionAuthorities.served_profiles``);
+    those resolve through ``profile_name_for_home``. Anything else is not a profile.
+    """
+    from hermes_constants import PROFILE_ID_RE, profile_name_for_home
+
+    token = value.strip()
+    if PROFILE_ID_RE.match(token):
+        return token
+    resolved = profile_name_for_home(token)
+    if isinstance(resolved, str) and PROFILE_ID_RE.match(resolved):
+        return resolved
+    return None
+
+
+def _served_profile_token(entry: Any) -> Optional[str]:
+    """One served-profile name from a fleet stamp, or None when the entry is unusable.
+
+    ``gateway_state.json`` still stamps a bare name. The first non-empty stamp key
+    wins (``profile_id``, then ``home``, then ``name``); a present value that is
+    not a profile id is corrupt and does not fall through to a later key.
+    """
+    if isinstance(entry, str):
+        return entry if entry else None
+    if not isinstance(entry, dict):
+        return None
+    for key in _SERVED_PROFILE_STAMP_KEYS:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return _profile_name_from_stamp(value)
+    return None
+
+
+def _served_profile_names(served_profiles: Any) -> Optional[list[str]]:
+    """Profile names a multiplexer row may vouch for.
+
+    One unusable entry drops the field. Callers discharge per-profile restart
+    obligations from it, so a record we cannot read completely must not widen
+    coverage (#147868).
+    """
+    if not isinstance(served_profiles, list) or not served_profiles:
+        return None
+    names: list[str] = []
+    for entry in served_profiles:
+        token = _served_profile_token(entry)
+        if not token:
+            return None
+        names.append(token)
+    return list(dict.fromkeys(names))
 
 
 def _fleet_row(
@@ -1132,14 +1189,9 @@ def _fleet_row(
         "code_version": code_version, "state": state,
         "code_root": str(code_root) if code_root else None,
     }
-    # A live, identity-verified multiplexer represents every profile in this
-    # list. Keep the field only when its shape is usable: callers use it to
-    # discharge per-profile restart obligations, so corrupt status must not
-    # widen coverage.
-    if isinstance(served_profiles, list) and served_profiles and all(
-        isinstance(name, str) and name for name in served_profiles
-    ):
-        row["served_profiles"] = list(dict.fromkeys(served_profiles))
+    names = _served_profile_names(served_profiles)
+    if names:
+        row["served_profiles"] = names
     return row
 
 

@@ -572,3 +572,78 @@ class TestPreUpdateBackupStep:
         empty = self._record(monkeypatch, args=args, snapshot_id=None, updates_cfg=updates_cfg)
         assert empty["skips"] == []
         assert [step["ok"] for step in empty["steps"]] == [False]
+
+
+class TestServedProfileShapes:
+    """Identify stamps ``served_profiles`` as home-path dicts; coverage matches names (#147868)."""
+
+    @staticmethod
+    def _homes():
+        from hermes_constants import get_hermes_home
+
+        root = get_hermes_home()
+        coder = root / "profiles" / "coder"
+        coder.mkdir(parents=True, exist_ok=True)
+        return root, coder
+
+    def test_identify_dicts_are_kept_and_cover_served_profiles(self, monkeypatch):
+        from hermes_cli.update_cmd_fleet import _fleet_covered_gateways
+
+        root, coder = self._homes()
+        sha = "c" * 40
+        identity = {
+            "pid": 4242,
+            "code_sha": sha,
+            "code_version": "1.0",
+            "served_profiles": [
+                {"profile_id": str(root), "home": str(root)},
+                {"profile_id": str(coder), "home": str(coder)},
+            ],
+        }
+        monkeypatch.setattr(ur, "_code_identity", lambda refresh=False: {"sha": sha})
+        monkeypatch.setattr(ur, "_profile_homes", lambda: [("default", root)])
+        monkeypatch.setattr(ur, "_socket_identity", lambda home: (4242, identity))
+
+        fleet = ur.collect_fleet_versions()
+
+        assert fleet[0]["profile"] == "default"
+        assert fleet[0]["served_profiles"] == ["default", "coder"]
+        assert _fleet_covered_gateways(fleet) == {("gateway", "default"), ("gateway", "coder")}
+
+    def test_legacy_name_list_still_covers(self):
+        from hermes_cli.update_cmd_fleet import _fleet_covered_gateways
+
+        row = ur._fleet_row(
+            "default", 7, "a" * 40, "1", "a" * 40,
+            served_profiles=["default", "coder", "coder"],
+        )
+
+        assert row["served_profiles"] == ["default", "coder"]
+        assert _fleet_covered_gateways([row]) == {("gateway", "default"), ("gateway", "coder")}
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            lambda root, coder: {"home": str(coder)},
+            lambda root, coder: {"name": "coder"},
+            lambda root, coder: {"profile_id": "coder", "home": str(root)},
+        ],
+        ids=["home-path", "name", "profile-id-preferred"],
+    )
+    def test_dict_stamp_resolves_to_the_profile_name(self, entry):
+        root, coder = self._homes()
+        row = ur._fleet_row(
+            "default", 1, "a", "1", "a", served_profiles=[entry(root, coder)],
+        )
+        assert row["served_profiles"] == ["coder"]
+
+    def test_unusable_entries_do_not_widen_coverage(self):
+        from hermes_cli.update_cmd_fleet import _fleet_covered_gateways
+
+        row = ur._fleet_row(
+            "default", 7, "a" * 40, "1", "a" * 40,
+            served_profiles=[{"profile_id": "/not/a/profile", "name": "coder"}, ""],
+        )
+
+        assert "served_profiles" not in row
+        assert _fleet_covered_gateways([row]) == {("gateway", "default")}
