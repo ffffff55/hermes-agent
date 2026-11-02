@@ -195,6 +195,8 @@ def _record_owed_gateway_inventory(plan, stopped_unmapped_pids=()) -> None:
     has no ``gateway_state.json`` the gateway-less probe could see, so absence would settle it.
     A readable inventory (a same-SHA catch-up keeps the standing record) only GROWS: rows this run
     newly owes are appended, so a mapped successor cannot discharge a newly stopped unmapped one.
+    A ``stopped_unmapped`` PID a mapped row already names is that same process, not a second debt,
+    and is not appended (#147873).
     """
     from hermes_cli import update_cmd_fleet as fleet
     armed = fleet._fleet_restart_obligation_armed()
@@ -217,6 +219,12 @@ def _record_owed_gateway_inventory(plan, stopped_unmapped_pids=()) -> None:
         and runtime.profile.strip() and runtime.profile != "unknown"
     ] + [{"kind": "gateway", "profile": None, "pid": pid, "stopped_unmapped": True}
          for pid in sorted(stopped_unmapped_pids)]
+    # The unmapped sweep can stop a PID the plan, or the standing inventory, already named.
+    # Recording it again as stopped_unmapped makes discharge demand a live gateway no mapped
+    # owed row explains, so that PID's own successor can never clear the obligation (#147873).
+    # A PID nothing else named stays owed.
+    mapped_pids = {row.get("pid") for row in (*recorded, *rows) if row.get("profile")}
+    rows = [row for row in rows if row.get("profile") or row.get("pid") not in mapped_pids]
     rows = [row for row in rows if row not in recorded]
     if rows:
         # Not armed any more (a pre-restart probe settled an inventory-less record): re-arm, the

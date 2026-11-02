@@ -238,3 +238,65 @@ def test_same_sha_retry_adds_newly_stopped_unmapped_debt_to_an_existing_inventor
     assert fleet._fleet_restart_obligation_armed()
     fleet_rows.append({"profile": "work", "state": "current", "code_sha": "head", "pid": 9})
     assert fleet._marker_only_restart_obsolete() is True
+
+
+def test_same_pid_mapped_and_stopped_unmapped_discharges_with_its_successor(monkeypatch, tmp_path):
+    # The unmapped sweep stops a PID the plan already named (#147873, same class as #144754).
+    # Writing it twice — mapped and stopped_unmapped — makes _marker_only_restart_obsolete
+    # fail closed forever: the live successor covers the mapped row, so it can never also be
+    # an unexplained successor of the unmapped row. One current gateway must settle it.
+    from hermes_cli import update_cmd_fleet as fleet, update_cmd_fleet_verify as fleet_verify
+    from hermes_cli import update_host_obligation as host, update_receipt
+    from hermes_cli.update_inventory import RuntimeRecord, UpdatePlan
+
+    monkeypatch.setattr(host, "host_obligation_path", lambda: tmp_path / "host-update-restart.json")
+    monkeypatch.setattr(fleet, "_current_checkout_sha", lambda: "head")
+    fleet_verify._record_owed_gateway_inventory(
+        UpdatePlan(runtimes=[RuntimeRecord(kind="gateway", profile="default", pid=912, supervisor="launchd")]),
+        stopped_unmapped_pids=[912],
+    )
+
+    rows = json.loads(fleet._obligation_fields()["inventory"])["runtimes"]
+    assert [(row.get("profile"), row.get("pid")) for row in rows] == [("default", 912)]
+    assert not any(row.get("stopped_unmapped") for row in rows)
+
+    fleet_rows = [{"profile": "default", "state": "current", "code_sha": "head", "pid": 10001}]
+    monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda **kw: list(fleet_rows))
+    assert fleet._fleet_restart_obligation_armed()
+    assert fleet._marker_only_restart_obsolete() is True
+    assert not fleet._fleet_restart_obligation_armed()
+
+
+def test_distinct_stopped_unmapped_pid_stays_owed_when_a_mapped_pid_is_deduped(monkeypatch, tmp_path):
+    # Dedupe drops only the twin of a PID a mapped row already names, including one that
+    # lives only in the standing inventory. A different stopped PID is still a gateway
+    # with no successor, and the mapped gateway's restart does not settle it.
+    from hermes_cli import update_cmd_fleet as fleet, update_cmd_fleet_verify as fleet_verify
+    from hermes_cli import update_host_obligation as host, update_receipt
+    from hermes_cli.update_inventory import RuntimeRecord, UpdatePlan
+
+    monkeypatch.setattr(host, "host_obligation_path", lambda: tmp_path / "host-update-restart.json")
+    monkeypatch.setattr(fleet, "_current_checkout_sha", lambda: "head")
+    fleet._write_fleet_restart_pending_marker(expected_sha="head", runtimes=[
+        {"kind": "gateway", "profile": "default", "pid": 912},
+    ])
+    fleet_verify._record_owed_gateway_inventory(
+        UpdatePlan(runtimes=[RuntimeRecord(kind="gateway", profile="work", pid=8555)]),
+        stopped_unmapped_pids=[912, 4401],
+    )
+
+    rows = json.loads(fleet._obligation_fields()["inventory"])["runtimes"]
+    assert {"kind": "gateway", "profile": "default", "pid": 912} in rows
+    assert any(row.get("profile") == "work" and row.get("pid") == 8555 for row in rows)
+    assert not any(row.get("stopped_unmapped") and row.get("pid") == 912 for row in rows)
+    assert {"kind": "gateway", "profile": None, "pid": 4401, "stopped_unmapped": True} in rows
+
+    fleet_rows = [
+        {"profile": "default", "state": "current", "code_sha": "head", "pid": 10001},
+        {"profile": "work", "state": "current", "code_sha": "head", "pid": 10002},
+    ]
+    monkeypatch.setattr(update_receipt, "collect_fleet_versions", lambda **kw: list(fleet_rows))
+    assert fleet._marker_only_restart_obsolete() is False
+    assert fleet._fleet_restart_obligation_armed()
+    fleet_rows.append({"profile": "extra", "state": "current", "code_sha": "head", "pid": 10003})
+    assert fleet._marker_only_restart_obsolete() is True
