@@ -1,7 +1,7 @@
 """`hermes config get/set` must recognize keys the runtime reads but DEFAULT_CONFIG leaves unseeded:
 core provider selections (``browser.cloud_provider``, ``<category>.use_gateway``), MoA preset fields
-(``moa.presets.<name>.fanout``), core-owned keys with a known reader (``computer_use.backend``), and keys
-an ACTIVE plugin declares through ``config_keys``.
+(``moa.presets.<name>.fanout``), core-owned keys with a known reader (``computer_use.backend``,
+``agent.personalities.<name>``), and keys an ACTIVE plugin declares through ``config_keys``.
 Declarations never weaken the schema's typo notices."""
 
 import argparse
@@ -140,6 +140,37 @@ def test_computer_use_backend_set_is_what_the_selector_reads(hermes_home, capsys
 
     assert not _set_notice("computer_use.backend", "widget-driver", capsys)
     assert configured_backend_name() == "widget-driver"
+
+
+def test_agent_personalities_name_validates_sets_and_gets_without_notice(hermes_home, capsys):
+    """``agent.personalities.<name>`` is an open map available_personalities prefers over the
+    top-level ``personalities`` block. The schema walk used to refuse it as the wrong-prefix
+    typo ``personalities.<name>`` unless ``--force`` was passed."""
+    from hermes_cli.config import _validate_config_key, get_config_value, load_config
+    from hermes_cli.personality import available_personalities
+
+    assert _validate_config_key("agent.personalities.demo") == (True, None)
+    assert _validate_config_key("agent.personalities.demo.system_prompt") == (True, None)
+    # The original top-level open dict stays accepted.
+    assert _validate_config_key("personalities.demo") == (True, None)
+
+    _write_config(hermes_home, {"personalities": {"demo": "from-root"}})
+    assert not _set_notice("agent.personalities.demo", "from-agent", capsys)
+    get_config_value("agent.personalities.demo", as_json=True)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == "from-agent"
+    assert NOTICE not in captured.err
+    assert "Did you mean" not in captured.err
+
+    assert not _set_notice("personalities.other", "from-root-other", capsys)
+    get_config_value("personalities.other", as_json=True)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == "from-root-other"
+    assert NOTICE not in captured.err
+
+    merged = available_personalities(load_config())
+    assert merged["demo"] == "from-agent"
+    assert merged["other"] == "from-root-other"
 
 
 def test_plugin_config_keys_count_only_while_the_plugin_is_enabled(hermes_home, capsys):

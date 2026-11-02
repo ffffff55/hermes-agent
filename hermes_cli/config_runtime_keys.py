@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 CORE_RUNTIME_KEYS: dict[str, str] = {
     "computer_use.backend": "plugins/computer_use/__init__.py configured_backend_name() (unset = cua)",
     "dashboard.kanban": "plugins/kanban/dashboard/plugin_api.py (bundled dashboard tab preferences)",
+    # Open name→definition map. DEFAULT_CONFIG seeds only the top-level ``personalities``
+    # dict, so the schema walk treats ``agent.personalities.<name>`` as the wrong-prefix
+    # typo ``personalities.<name>`` and refuses the write. available_personalities reads
+    # this path and lets it win on a name clash.
+    "agent.personalities": "hermes_cli/personality.py available_personalities() (wins over top-level personalities)",
 }
 
 
