@@ -649,10 +649,27 @@ def _apply_launch_overrides(params, config):
         pin_reasoning_effort(config, params['reasoning'])
 
 
+def _drop_unnamed_plugin_and_mcp(enabled, explicit, config):
+    """Drop plugin toolsets and MCP servers an explicit pick did not name.
+
+    ``_get_platform_tools`` unions plugin toolsets missing from ``known_plugin_toolsets``
+    and every enabled MCP server onto the list a ``-t`` pick just wrote, so the pick was
+    only checked as a subset and ``hermes chat -t session_search`` still received those
+    tools (#147832). ``mcp-<server>`` names the same server as its bare name.
+    """
+    from hermes_cli.tools_config import _get_plugin_toolset_keys, enabled_mcp_server_names
+
+    named = set(explicit) | {name[4:] for name in explicit if name.startswith('mcp-')}
+    auto = set(_get_plugin_toolset_keys()) | set(enabled_mcp_server_names(config))
+    enabled -= auto - named
+    return enabled
+
+
 def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, bypass=False):
-    """Validate explicit toolsets and return the session's enabled toolset set. Without a pick, a
-    *coding_posture* session runs ``focus_toolsets`` instead of the profile default while the profile
-    stays on ``focus``; the gateway decides it, never the client."""
+    """Validate explicit toolsets and return the session's enabled toolset set. An explicit pick
+    is that set: plugin toolsets and MCP servers it did not name are not inherited (#147832).
+    Without a pick, a *coding_posture* session runs ``focus_toolsets`` instead of the profile
+    default while the profile stays on ``focus``; the gateway decides it, never the client."""
     from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
     from hermes_cli.toolset_validation import saved_toolset_resolver
     from toolsets import validate_toolset
@@ -683,6 +700,7 @@ def _resolve_toolsets(params, config, source, safe_mode, coding_posture=False, b
         posture = focus_toolsets(config)
     enabled = set(posture) if posture is not None else _get_platform_tools(config, 'acp' if source == 'acp' else 'cli')
     if explicit is not None:
+        enabled = _drop_unnamed_plugin_and_mcp(enabled, explicit, config)
         from toolsets import resolve_toolset
         requested = {t for name in explicit for t in resolve_toolset(name)}
         effective = {t for name in enabled for t in resolve_toolset(name)}
