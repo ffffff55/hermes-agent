@@ -568,3 +568,23 @@ def prepare_api_runtime(model, runtime_kwargs):
         confirmed_runtime_lock=bool(options.get('confirmed_runtime_lock')),
         gateway_session_key=None, session_id=None)
     return model, runtime_kwargs
+
+
+def record_api_runtime(agent, model, runtime_kwargs):
+    """Stamp the resolved runtime the way ``APIServerAdapter._create_agent`` does.
+
+    Session turns resolve a named custom provider (``providers.<name>``) to the
+    runtime id ``custom`` in ``prepare_api_runtime``, then build the agent here.
+    The confirmed lock compares this stamp with the agent that actually ran.
+    Without it the check falls back to the literal requested name and rejects
+    every locked turn (#148601, the #116752 stamp on the session path)."""
+    current = api_execution.get()
+    if current is None or agent is None:
+        return
+    options = current.get('settings') or {}
+    runtime_kwargs = runtime_kwargs or {}
+    agent._hermes_api_runtime = {
+        'provider': runtime_kwargs.get('provider') or getattr(agent, 'provider', '') or '',
+        'model': getattr(agent, 'model', None) or model or '',
+        'route_source': ('session_model_lock' if options.get('confirmed_runtime_lock')
+                         else options.get('route_source') or 'global')}

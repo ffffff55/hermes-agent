@@ -1342,6 +1342,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         agent, reused_cached_agent = self._resolve_turn_agent(
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
+        # Same resolved-identity stamp ``_create_agent`` writes, so a confirmed lock compares
+        # the catalog identity (named custom providers resolve to ``custom``) with the agent.
+        from gateway.session_api_turn import record_api_runtime
+        record_api_runtime(agent, model, runtime_kwargs)
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice
