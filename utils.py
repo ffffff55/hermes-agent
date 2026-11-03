@@ -615,6 +615,42 @@ def _rt_value(value: Any) -> Any:
     return value
 
 
+def _release_empty_block_collection(parent: Any, key: Any, node: Any) -> None:
+    """Emptied block collections must not be dumped with their old comment column.
+
+    A block sequence whose key carries an inline comment dumps, once emptied, as
+    the comment, a bare ``[]`` on the next line, and the following keys smashed
+    onto one line (#148524). Flow style keeps ``key: []  # comment``. A comment
+    parked between the key and the block moves above the key: left in the
+    pre-value slot it reproduces the same broken document.
+    """
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+    if not isinstance(node, (CommentedMap, CommentedSeq)) or len(node) != 0:
+        return
+    fa = getattr(node, "fa", None)
+    if fa is not None and fa.flow_style() is False:
+        fa.set_flow_style()
+    if not isinstance(parent, CommentedMap):
+        return
+    items = getattr(getattr(parent, "ca", None), "items", None)
+    if not items or key not in items:
+        return
+    slot = items[key]
+    # Map comment slot: [pre, before-key, end-of-line, before-value].
+    if len(slot) < 4 or not slot[3]:
+        return
+    moved = list(slot[3])
+    if slot[1] is None:
+        slot[1] = moved
+    else:
+        slot[1].extend(moved)
+    slot[3] = None
+    comment = getattr(getattr(node, "ca", None), "comment", None)
+    if comment is not None and len(comment) > 1:
+        comment[1] = None
+
+
 def atomic_roundtrip_yaml_save(path: str | Path, new_state: dict, *,
                                extra_content_on_create: str | None = None) -> None:
     """Persist a full config-state dict while preserving comments and ordering.
@@ -623,7 +659,9 @@ def atomic_roundtrip_yaml_save(path: str | Path, new_state: dict, *,
     ``hermes_cli.config.atomic_config_write`` or ``atomic_config_replace``): the document is
     loaded through ruamel round-trip mode and *new_state* is merged onto it, so comments, key order, quotes, blank
     lines and readable Unicode survive. Only nodes whose value actually changed are reassigned;
-    an untouched scalar or list keeps its inline comments and formatting. Keys absent from
+    an untouched scalar or list keeps its inline comments and formatting. An emptied block
+    sequence or map is switched to flow style so an inline comment cannot split the key
+    from ``[]``/``{}`` and smash the following lines (#148524). Keys absent from
     *new_state* are deleted ("explicit absence": ``cfg.pop(k)`` + save removes ``k`` from disk).
     ``extra_content_on_create`` (commented example blocks) is appended only when the file is
     being created — re-appending it on every rewrite is how the stock boilerplate replaced
@@ -657,8 +695,10 @@ def atomic_roundtrip_yaml_save(path: str | Path, new_state: dict, *,
         current = dst[key]
         if isinstance(value, dict) and isinstance(current, CommentedMap):
             _merge(current, value)
+            _release_empty_block_collection(dst, key, current)
         elif isinstance(value, list) and isinstance(current, CommentedSeq):
             _merge_seq(current, value)
+            _release_empty_block_collection(dst, key, current)
         elif not _unchanged(current, value):
             dst[key] = _rt_value(value)
         # else: unchanged — keep the existing node and the comments/quoting attached to it
