@@ -89,6 +89,10 @@ def _live_system_guard(request, monkeypatch):
     # Capture the test process's existing children at fixture start —
     # any *new* children spawned by the test are also allowlisted via
     # the live psutil walk below. Static set keeps the fast path cheap.
+    # Without psutil that walk is unavailable, so Popen records the pids
+    # it starts and the fallback allowlists only those. A pid this process
+    # did not start stays foreign.
+    _spawned_pids: set[int] = set()
     try:
         import psutil as _psutil
         _initial_children = {
@@ -110,7 +114,11 @@ def _live_system_guard(request, monkeypatch):
         if pid == test_pid or pid in _initial_children:
             return True
         if _psutil is None:
-            return False
+            # No parent walk. A pid this guard's own Popen started is still
+            # ours, so teardown can signal a late server child. With psutil
+            # the walk stays authoritative (a reused pid is not allowlisted
+            # from this set). Every unrecorded pid stays foreign.
+            return pid in _spawned_pids
         try:
             walker = _psutil.Process(pid)
         except Exception:
@@ -458,6 +466,10 @@ def _live_system_guard(request, monkeypatch):
             def __init__(self, cmd, *args, **kwargs):
                 _check_subprocess_cmd("Popen", cmd, kwargs)
                 super().__init__(cmd, *args, **kwargs)
+                # run/call/check_*/asyncio/os.popen all reach this class.
+                # Record only after a real start; a refused command raises
+                # above and never joins the allowlist.
+                _spawned_pids.add(self.pid)
 
         _GuardedPopen.__name__ = "Popen"
         _GuardedPopen.__qualname__ = "Popen"
