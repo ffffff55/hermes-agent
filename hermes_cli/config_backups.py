@@ -11,6 +11,7 @@ for the same reason is skipped, and only the newest ``keep`` per reason survive,
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -46,7 +47,9 @@ def backup_config(config_path: Path, reason: str, *, keep: int = DEFAULT_KEEP) -
 
     Skips when the file is missing/empty, or when the newest backup for *reason* already holds
     identical bytes. Never raises: a failed backup must not block the write it precedes.
-    Skipped entirely for a config backend without file tooling (no local copies, D2).
+    The copy is owner-only (0600), the same mode ``_secure_file`` applies to
+    config.yaml, even when the source was momentarily world-readable. Skipped
+    entirely for a config backend without file tooling (no local copies, D2).
     """
     from hermes_cli.config_backend import supports_file_tooling
     if not supports_file_tooling():
@@ -66,6 +69,12 @@ def backup_config(config_path: Path, reason: str, *, keep: int = DEFAULT_KEEP) -
         if dest.is_symlink() or dest.exists():  # never write through a planted link
             return None
         shutil.copy2(config_path, dest)  # config-reader: ok — file tooling, gated above
+        # copy2 keeps the source mode, so a momentarily 0644 config.yaml would
+        # leave a world-readable backup of credentials.
+        try:
+            os.chmod(dest, 0o600)
+        except (OSError, NotImplementedError) as exc:
+            logger.debug("Could not restrict permissions on %s: %s", dest, exc)
         for stale in [dest, *existing][keep:]:
             stale.unlink(missing_ok=True)
         return dest

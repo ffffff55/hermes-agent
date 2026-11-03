@@ -1,6 +1,9 @@
 """config.yaml backups: one dir, deduped, bounded — never a pile of siblings in HERMES_HOME."""
 import os
+import stat
 from pathlib import Path
+
+import pytest
 
 from hermes_cli.config_backups import backup_config, list_config_backups
 
@@ -40,6 +43,28 @@ def test_same_size_edit_within_one_mtime_tick_is_still_backed_up(tmp_path: Path,
 
     second = backup_config(cfg, "pre-setup")
     assert second is not None and second.read_text() == "model: b\n"
+
+
+@pytest.mark.platforms("posix")  # permission bits are host-native
+def test_world_readable_config_backup_is_owner_only(tmp_path: Path, monkeypatch):
+    """A 0644 config.yaml must not leave a world-readable backup (#148317).
+
+    ``shutil.copy2`` preserves the source mode. config.yaml is owner-only
+    (0600, ``_secure_file``); the backup must be too, and the source stays as-is.
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    os.chmod(cfg, 0o644)
+    monkeypatch.setattr(
+        "hermes_cli.config_backups.time.strftime",
+        lambda _fmt: "20260101000000",
+    )
+
+    dest = backup_config(cfg, "pre-setup")
+
+    assert dest is not None and dest.read_text() == "model: a\n"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o644
 
 
 def test_legacy_siblings_move_but_user_named_copies_stay(tmp_path: Path):
