@@ -32,11 +32,11 @@ def test_missing_explicit_bundle_falls_back_to_the_platform_store(tmp_path, capl
 
 
 def test_missing_bundle_under_a_cert_env_var_shares_the_platform_context(tmp_path, monkeypatch):
-    """With SSL_CERT_FILE exported the platform store is handed over as one
-    shared context (httpx would otherwise read the env var itself); a missing
-    bundle must land on that same object, not a second pool. The long-lived
-    clients' platform_ssl_context() honours the bundle ON TOP of the platform
-    store (as httpx verify=True did), cached once."""
+    """With SSL_CERT_FILE exported, resolve_httpx_verify() hands httpx one
+    shared context (httpx would otherwise read the env var itself). That
+    context is platform_ssl_context(): the bundle on top of the platform
+    store, cached once. A missing explicit bundle lands on the same object,
+    not a second pool."""
     import ssl
 
     import certifi
@@ -51,9 +51,32 @@ def test_missing_bundle_under_a_cert_env_var_shares_the_platform_context(tmp_pat
 
     bundle_ctx = ssl_verify.platform_ssl_context()
     assert bundle_ctx is ssl_verify.platform_ssl_context()
-    assert bundle_ctx is not platform
+    assert bundle_ctx is platform
     assert type(bundle_ctx) is ssl.SSLContext  # truststore-injected: bundle + OS store
     assert bundle_ctx is ssl_verify._CA_CONTEXTS[(str(Path(certifi.where()).resolve()), True)]
+
+
+def test_resolve_httpx_verify_unions_ssl_cert_file_onto_platform_store(tmp_path, monkeypatch):
+    """Regression for #148241: an existing SSL_CERT_FILE is trusted on top of
+    the platform store. resolve_httpx_verify() with no ca_bundle or ssl_verify
+    override must be the cached union context, not the bare platform context
+    that ignores the file."""
+    import certifi
+
+    from agent import ssl_verify
+
+    bundle = tmp_path / "corp-bundle.pem"
+    bundle.write_bytes(Path(certifi.where()).read_bytes())
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    monkeypatch.setattr(ssl_verify, "_CA_CONTEXTS", {})
+
+    verify = resolve_httpx_verify()
+
+    resolved = str(bundle.resolve())
+    assert verify is ssl_verify.platform_ssl_context()
+    assert verify is ssl_verify._CA_CONTEXTS[(resolved, True)]
+    assert (None, False) not in ssl_verify._CA_CONTEXTS
 
 
 @pytest.mark.parametrize("value", [False, "false", "0", "no", "off", "FALSE"])

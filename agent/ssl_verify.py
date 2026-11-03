@@ -309,7 +309,11 @@ def resolve_httpx_verify(
     2. explicit ``ca_bundle`` (the provider's ``ssl_ca_cert``) — that
        bundle INSTEAD of the platform store, for an endpoint whose chain
        the machine has no reason to trust
-    3. ``True`` — the platform store, via the process-wide install, or the
+    3. ``SSL_CERT_FILE`` or ``SSL_CERT_DIR`` — the shared platform context.
+       An existing ``SSL_CERT_FILE`` is trusted on top of the OS store; a
+       stale path falls back to the store alone. ``SSL_CERT_DIR`` is not
+       loaded; the context still keeps httpx off those env vars
+    4. ``True`` — the platform store, via the process-wide install, or the
        platform context when the certifi bundle this process resolved at
        import no longer exists (a replaced install environment)
 
@@ -335,9 +339,10 @@ def resolve_httpx_verify(
             "ssl_ca_cert path does not exist: %s — using the OS trust store instead",
             effective_ca,
         )
-    # HTTPX reads CA env vars before the injected verifier gets control. Pass
-    # the platform context directly so stale paths cannot break construction;
-    # proxy environment handling remains enabled.
+    # HTTPX reads CA env vars before the injected verifier gets control.
+    # platform_ssl_context() trusts an existing SSL_CERT_FILE on top of the
+    # OS store and falls back when that path is stale, so construction never
+    # opens the env path itself. Proxy environment handling remains enabled.
     if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
-        return _shared_context(None)
+        return platform_ssl_context()
     return _default_verify()
