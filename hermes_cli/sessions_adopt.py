@@ -97,7 +97,7 @@ _SKIP_HINTS = {
 
 def _refusal(exc) -> str:
     """One owner refusal as the report prints it: the reason code, then why. A field-level refusal
-    (a launch directory that no longer exists) names the field and the owner's bounded detail."""
+    names the field and the owner's bounded detail."""
     reason, field, detail = str(exc), exc.data.get('field'), exc.data.get('detail')
     why = _SKIP_HINTS.get(reason) or (f'{field}: {detail}' if field and detail else 'refused by the gateway')
     return f'{reason} ({why})'

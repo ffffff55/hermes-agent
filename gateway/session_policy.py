@@ -416,9 +416,25 @@ def present_sections(config):
     return config
 
 
-def build_policy(params, config, *, private_secrets=None, profile_terminal=True, workspace_posture=False,
-                 client_local=False):
+def _resolve_launch_cwd(params, *, frozen_workspace=False):
+    """The launch workspace: a named absolute directory, else ``resolve_agent_cwd``.
+
+    Create requires a directory that exists. Resume adoption (``frozen_workspace``)
+    keeps a stored absolute path whose directory is gone, so the turn gate can
+    refuse ``workspace_unavailable`` with that path instead of a create-time
+    ``invalid_params``. An unnamed cwd still has to exist.
+    """
     from agent.runtime_cwd import resolve_agent_cwd
+    named = 'cwd' in params
+    cwd = params['cwd'] if named else str(resolve_agent_cwd())
+    if isinstance(cwd, str) and Path(cwd).is_absolute() and (
+            Path(cwd).is_dir() or (frozen_workspace and named)):
+        return cwd
+    _refuse('cwd', 'must be an absolute path to an existing directory')
+
+
+def build_policy(params, config, *, private_secrets=None, profile_terminal=True, workspace_posture=False,
+                 client_local=False, frozen_workspace=False):
     from tools.terminal_scope import build_profile_terminal_scope, default_terminal_scope
     from hermes_constants import get_hermes_home
 
@@ -440,9 +456,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     model = params.get('model')
     if 'model' in params and (not isinstance(model, str) or not model.strip()):
         _refuse('model', 'must be a non-empty string')
-    cwd = params.get('cwd', str(resolve_agent_cwd()))
-    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
-        _refuse('cwd', 'must be an absolute path to an existing directory')
+    cwd = _resolve_launch_cwd(params, frozen_workspace=frozen_workspace)
     row_cwd = params.get('row_cwd')
     if 'row_cwd' in params and (not isinstance(row_cwd, str) or (row_cwd and not Path(row_cwd).is_absolute())):
         _refuse('row_cwd', 'must be an absolute path when set')

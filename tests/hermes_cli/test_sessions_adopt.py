@@ -114,14 +114,23 @@ def _seed_long_and_moved(home):
 
 
 @pytest.mark.platforms("linux")
-def test_adopt_survives_a_long_history_and_names_what_the_owner_refused(tmp_path, model_peer, monkeypatch, capsys):
+def test_adopt_survives_a_long_history_and_a_missing_workspace(tmp_path, model_peer, monkeypatch, capsys):
+    """A long transcript still adopts, and a stored folder that is already gone adopts on that cwd.
+
+    Regression for #148238: adoption used to copy the stale cwd into create params and refuse
+    ``invalid_params`` before the frozen-cwd turn gate could name the folder.
+    """
     with running_owner(tmp_path, model_peer, prepare=_seed_long_and_moved, extra_env=_OWNER_ENV) as (home, descriptor, _env):
         monkeypatch.setenv('HERMES_HOME', str(home))
         status, out = _adopt(capsys)
-        assert status == 0 and 'Adopted 1 chat(s).' in out, out
-        assert 'Skipped 1: invalid_params (cwd: must be an absolute path to an existing directory).' in out, out
+        assert status == 0 and 'Adopted 2 chat(s).' in out, out
+        assert 'invalid_params' not in out, out
         resumed = asyncio.run(_browser_resume(home, descriptor, 'long-desktop'))
         assert resumed.get('result', {}).get('session_id') == 'long-desktop', str(resumed)[:300]
+        moved = asyncio.run(_browser_resume(home, descriptor, 'moved-desktop'))
+        assert moved.get('result', {}).get('session_id') == 'moved-desktop', moved
+        assert [m['content'] for m in moved['result']['messages']] == ['MOVED']
+        assert moved['result']['info']['cwd'] == str(home / 'deleted-worktree')
 
 
 def _rollback_journal_store(home):

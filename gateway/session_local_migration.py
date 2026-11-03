@@ -304,7 +304,11 @@ def adopt_legacy_session(authority, actor, row):
             config['model'] = {k: v for k, v in model_cfg.items() if k not in dropped}
             if saved['base_url']:
                 params['provider'] = _endpoint_owner(saved, config)
-    policy = build_policy(params, config, private_secrets=private)
+    # A stored absolute folder that is already gone stays this chat's workspace.
+    # Create would refuse it as invalid_params; the turn gate then names the
+    # folder and the way back (workspace_unavailable). Dropping it would resume
+    # somewhere else and break the frozen-cwd contract.
+    policy = build_policy(params, config, private_secrets=private, frozen_workspace=True)
     if api_mode:
         config = json.loads(policy.config_json)
         config.setdefault('model', {})['api_mode'] = api_mode
