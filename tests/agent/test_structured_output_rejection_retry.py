@@ -18,6 +18,10 @@ its Anthropic translation, with a hard 400:
     model reject the OBJECT-form ``response_format.json_schema`` by shape --
     ``422 ... body.response_format.json_schema: str type expected`` -- instead
     of naming the feature, so the error never mentions an unsupported option.
+  * Vertex AI org policy ``constraints/vertexai.allowedPartnerModelFeatures``
+    rejects ``structured_outputs`` ("output_config.format is not enabled" /
+    "disallowed feature"). Gateways deliver that as an SSE error after a
+    committed 200, so the SDK raises it with ``status_code == 200`` (#148590).
 
 Callers tolerate an unconstrained reply: the title prompt demands bare JSON
 and ``_extract_title_text`` has a loose-JSON fallback. The fix is reactive,
@@ -101,6 +105,36 @@ class TestIsStructuredOutputRejection:
         exc = RuntimeError("output_config: Extra inputs are not permitted")
         exc.status_code = 500
         assert _is_structured_output_rejection(exc) is False
+
+    @pytest.mark.parametrize(("message", "status_code", "expected"), [
+        # Vertex org policy, SSE error after a committed 200 and a plain 400 (#148590).
+        (
+            "Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures "
+            "violated for `projects/<id>` attempting to use a disallowed feature structured_outputs "
+            "for Partner model claude-sonnet-5-5. output_config.format is not enabled for this model "
+            "in this project (Vertex org-policy: constraints/vertexai.allowedPartnerModelFeatures -> "
+            "structured_outputs). Retry without output_config.format.",
+            200,
+            True,
+        ),
+        (
+            "Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures "
+            "violated for `projects/<id>` attempting to use a disallowed feature structured_outputs "
+            "for Partner model claude-sonnet-5-5. output_config.format is not enabled for this model "
+            "in this project (Vertex org-policy: constraints/vertexai.allowedPartnerModelFeatures -> "
+            "structured_outputs). Retry without output_config.format.",
+            400,
+            True,
+        ),
+        # Unrelated stream error on a committed 200 must not strip the format.
+        ("Overloaded", 200, False),
+        # "disallowed feature" alone is not this rejection.
+        ("attempting to use a disallowed feature structured_outputs", 400, False),
+    ])
+    def test_vertex_org_policy_rejection(self, message, status_code, expected):
+        exc = RuntimeError(message)
+        exc.status_code = status_code
+        assert _is_structured_output_rejection(exc) is expected
 
 
 class TestWithoutStructuredOutputFormat:
