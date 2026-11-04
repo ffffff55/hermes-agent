@@ -1,4 +1,8 @@
-"""Structured-output translation for Anthropic auxiliary calls."""
+"""Structured-output translation for Anthropic auxiliary calls.
+
+Regression for #148380: schema-less ``json_object`` must not set
+``output_config.format``.
+"""
 
 from __future__ import annotations
 
@@ -85,14 +89,36 @@ def test_json_schema_response_format_uses_native_output_config():
     _assert_no_raw_response_format(api_kwargs)
 
 
-def test_json_object_response_format_uses_permissive_object_schema():
+def test_json_object_response_format_sends_no_output_config_format():
+    """Plugin ``json_mode`` without a schema stays unconstrained on Anthropic.
+
+    ``_json_response_format(json_mode=True)`` is ``{"type": "json_object"}``.
+    A bare ``{"type": "object"}`` schema 400s unless ``additionalProperties``
+    is false, and that flag with no properties would constrain the model to
+    ``{}``. Leave the request alone so ``_parse_structured_text`` can parse
+    the reply. Regression for #148380.
+    """
+    from agent.plugin_llm import _json_response_format
+
+    extra = _json_response_format(json_mode=True, json_schema=None)
+    assert extra == {"response_format": {"type": "json_object"}}
+    api_kwargs = _capture_anthropic_kwargs(extra)
+
+    assert "format" not in (api_kwargs.get("output_config") or {})
+    _assert_no_raw_response_format(api_kwargs)
+
+
+def test_json_object_response_format_keeps_adaptive_thinking_effort():
+    """Skipping ``json_object`` must not drop an effort already on the body."""
     api_kwargs = _capture_anthropic_kwargs({
+        "reasoning": {"enabled": True, "effort": "high"},
         "response_format": {"type": "json_object"},
     })
 
-    assert api_kwargs["output_config"]["format"] == {
-        "type": "json_schema",
-        "schema": {"type": "object"},
+    assert api_kwargs["output_config"] == {"effort": "high"}
+    assert api_kwargs["thinking"] == {
+        "type": "adaptive",
+        "display": "summarized",
     }
     _assert_no_raw_response_format(api_kwargs)
 
