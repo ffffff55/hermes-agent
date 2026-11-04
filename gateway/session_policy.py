@@ -984,14 +984,24 @@ def route_launch_key(authority, policy, config):
     return launch_key(authority, policy)
 
 
+def _stored_surface_rejected(policy, surfaces):
+    """Refuse a source that is not a known surface with its platform.
+
+    ``local`` is the placeholder peer refresh persists (``STORED_AS_LOCAL``), not a
+    surface to validate, so a receipt stored that way still loads.
+    """
+    if policy.source == 'local':
+        return False
+    return policy.source not in surfaces or policy.platform != surfaces[policy.source]
+
+
 def restore_policy(data):
     """Reject incomplete private policy rather than rebuilding from current defaults."""
     try:
         policy = LocalSessionPolicy(**data)
         from gateway.session_a2a import is_forward_policy
         surfaces = {**SURFACES, 'cron': 'cron', 'kanban': 'cli', 'bot_room': 'bot_room'}
-        if ((not is_forward_policy(policy) and
-             (policy.source not in surfaces or policy.platform != surfaces[policy.source]))
+        if ((not is_forward_policy(policy) and _stored_surface_rejected(policy, surfaces))
                 or not isinstance(policy.cwd, str) or not Path(policy.cwd).is_absolute()
                 or not isinstance(policy.model, str) or not policy.model.strip()
                 or not isinstance(policy.toolsets, (list, tuple))
