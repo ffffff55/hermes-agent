@@ -5577,11 +5577,7 @@ def resolve_vision_provider_client(
     api_key: Optional[str] = None, async_mode: bool = False,
     main_runtime: Optional[dict[str, Any]] = None,
 ) -> tuple[Optional[str], Optional[Any], Optional[str]]:
-    """Resolve the client actually used for vision tasks.
-
-    Direct endpoint overrides beat provider selection; explicit providers may force
-    experimental backends; auto mode only tries backends known to work.
-    """
+    """Resolve the vision client: endpoint override, then the explicit or auto backend."""
     runtime = _normalize_main_runtime(main_runtime)
     requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         "vision", provider, model, base_url, api_key
@@ -5597,6 +5593,10 @@ def resolve_vision_provider_client(
         )
         return provider_for_base_override, client, (final_model if client is not None else None)
     if requested == "auto":
+        # model=None re-reads auxiliary.vision.model; drop a foreign pin so auto uses the runtime model (#148477).
+        pinned = str(_get_auxiliary_task_config("vision").get("provider") or "").strip().lower()
+        if (provider or "").strip().lower() == "auto" and not str(model or "").strip() and pinned not in {"", "auto"}:
+            resolved_model = None
         return _vision_auto_route(runtime, resolved_model, resolved_api_mode, async_mode)
     if requested in _VISION_AUTO_PROVIDER_ORDER:
         sync_client, default_model = _resolve_strict_vision_backend(requested, resolved_model)
@@ -7293,7 +7293,7 @@ def _resolve_call_client(
             logger.warning("Vision provider %s unavailable, falling back to auto vision backends",
                            resolved_provider)
             effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto", model=resolved_model, async_mode=async_mode,
+                provider="auto", model=None, async_mode=async_mode,
                 main_runtime=main_runtime)
         if client is not None:
             resolved_provider = effective_provider or resolved_provider
