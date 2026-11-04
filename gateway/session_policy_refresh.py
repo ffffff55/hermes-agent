@@ -134,17 +134,42 @@ def _server_name(servers, name):
     return name[4:] if name.startswith('mcp-') and name not in servers else name
 
 
+def _stored_policy(db, session_id):
+    """The receipt's policy, or None when this session has no local receipt.
+
+    Messaging, cron and kanban never write ``gateway.local_policy.v1:<sid>``.
+    ``local_receipt`` raises ``storage_unavailable`` both when that key is absent
+    and when the stored value is corrupt; only the absent key means this session
+    takes no refresh. A present but unreadable receipt still raises.
+    """
+    from hermes_state_local import POLICY_PREFIX, local_receipt
+    from hermes_state_runtime import RuntimeStoreError
+    try:
+        return local_receipt(db, session_id)['policy']
+    except RuntimeStoreError as exc:
+        if exc.reason != 'storage_unavailable':
+            raise
+        with db._read_ctx() as conn:
+            present = conn.execute('SELECT 1 FROM state_meta WHERE key=?',
+                                   (POLICY_PREFIX + session_id,)).fetchone()
+        if present is not None:
+            raise
+        return None
+
+
 def _prepare(authority, session_id, mcp_only=False, adopt_only=False):
     """Off the owner loop: the stored policy, its refresh from this profile home's files, and the generation
-    it was derived at. None when the session takes no refresh or nothing moved. *adopt_only*: the adoption
+    it was derived at. None when the session takes no refresh (no local receipt, a non-local surface, a
+    bypass launch) or nothing moved. *adopt_only*: the adoption
     of a frozen Bot Chat alone, without the config-derived settings (a later open on the same attachment)."""
     from gateway.session_local import load_profile_config
     from gateway.session_policy import SURFACES, restore_policy
-    from hermes_state_local import local_receipt
     from hermes_state_mutation_prepared import policy_picks
     from tools.terminal_scope import build_profile_terminal_scope
     generation = authority.db.get_session(session_id)['runtime_generation']
-    stored = local_receipt(authority.db, session_id)['policy']
+    stored = _stored_policy(authority.db, session_id)
+    if stored is None:
+        return None
     old = restore_policy(stored)
     # A bypass launch never reads the profile; cron, Kanban and room routes are not resumed CLI sessions.
     if old.ignore_user_config or old.source not in SURFACES:
