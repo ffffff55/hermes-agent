@@ -204,12 +204,17 @@ _RAW_CONFIG_CACHE_MAX = 128
 # Guards every cache read/publish/evict: concurrent tool threads share it, and an unlocked
 # ``pop(next(iter(...)))`` races another thread's insert (RuntimeError) or pop (KeyError).
 _RAW_CONFIG_CACHE_LOCK = threading.Lock()
+# Last successful document per config path. A raised parse (torn mid-write YAML)
+# must not look like an empty ``skills.disabled`` and put every disabled skill
+# back in the index (#148812). One entry per path: a later good parse replaces it.
+_RAW_CONFIG_LAST_GOOD: dict[str, dict[str, Any]] = {}
 
 
 def _raw_config_cache_clear() -> None:
     """Test hook — drop the shared raw config cache."""
     with _RAW_CONFIG_CACHE_LOCK:
         _RAW_CONFIG_CACHE.clear()
+        _RAW_CONFIG_LAST_GOOD.clear()
 
 
 def _config_cache_key(config_path: Path) -> Optional[tuple[Any, ...]]:
@@ -220,7 +225,12 @@ def _config_cache_key(config_path: Path) -> Optional[tuple[Any, ...]]:
 
 
 def _load_raw_config() -> dict[str, Any]:
-    """Read config.yaml with a version-keyed cache (no hermes_cli.config import)."""
+    """Read config.yaml with a version-keyed cache (no hermes_cli.config import).
+
+    A parse that raises returns the last successful document for that same path,
+    so skill config fails closed. The first failure for a path still returns
+    ``{}``.
+    """
     from agent.safe_worker_policy import worker_config_snapshot
     from hermes_cli.config_backend import config_exists, read_config_doc
 
@@ -231,6 +241,7 @@ def _load_raw_config() -> dict[str, Any]:
     if not config_exists(config_path):
         return {}
     cache_key = _config_cache_key(config_path)
+    path_key = str(config_path)
     with _RAW_CONFIG_CACHE_LOCK:
         cached = _RAW_CONFIG_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
@@ -239,11 +250,16 @@ def _load_raw_config() -> dict[str, Any]:
         parsed = read_config_doc(config_path)
     except Exception as e:
         logger.debug("Could not read skill config %s: %s", config_path, e)
+        with _RAW_CONFIG_CACHE_LOCK:
+            last_good = _RAW_CONFIG_LAST_GOOD.get(path_key)
+        if last_good is not None:
+            return last_good
         return {}
     if not isinstance(parsed, dict):
         return {}
-    if cache_key is not None:
-        with _RAW_CONFIG_CACHE_LOCK:
+    with _RAW_CONFIG_CACHE_LOCK:
+        _RAW_CONFIG_LAST_GOOD[path_key] = parsed
+        if cache_key is not None:
             _RAW_CONFIG_CACHE[cache_key] = parsed
             while len(_RAW_CONFIG_CACHE) > _RAW_CONFIG_CACHE_MAX:
                 _RAW_CONFIG_CACHE.pop(next(iter(_RAW_CONFIG_CACHE)))

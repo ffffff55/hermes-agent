@@ -490,3 +490,55 @@ class TestBOMToleranceSiblingSites:
         assert fm is not None
         assert fm.get("name") == "bp"
 
+
+class TestSkillConfigParseFailureFailClosed:
+    """Regression for #148812: a failed config.yaml parse must not look like
+    ``skills.disabled`` is empty. Readers sit on ``_load_raw_config``."""
+
+    @staticmethod
+    def _use_home(monkeypatch, home):
+        from agent import skill_utils
+
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        skill_utils._raw_config_cache_clear()
+
+    @staticmethod
+    def _write(home, text: str) -> None:
+        (home / "config.yaml").write_text(text, encoding="utf-8")
+
+    def test_unparsable_config_keeps_last_disabled_skills(self, tmp_path, monkeypatch):
+        home = tmp_path / "hermes"
+        self._use_home(monkeypatch, home)
+        self._write(home, "skills:\n  disabled:\n    - airtable\n")
+
+        assert get_disabled_skill_names() == {"airtable"}
+
+        self._write(home, "skills: [airtable\n")
+        assert get_disabled_skill_names() == {"airtable"}
+        assert get_disabled_skill_names() == {"airtable"}
+
+    def test_first_unparsable_config_has_no_disabled_skills(self, tmp_path, monkeypatch):
+        home = tmp_path / "hermes"
+        self._use_home(monkeypatch, home)
+        self._write(home, "skills: [airtable\n")
+
+        assert get_disabled_skill_names() == set()
+
+    def test_successful_reparse_replaces_last_good_disabled_skills(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "hermes"
+        self._use_home(monkeypatch, home)
+        self._write(home, "skills:\n  disabled:\n    - airtable\n")
+        assert get_disabled_skill_names() == {"airtable"}
+
+        self._write(home, "skills: [airtable\n")
+        assert get_disabled_skill_names() == {"airtable"}
+
+        self._write(home, "skills:\n  disabled:\n    - github\n")
+        assert get_disabled_skill_names() == {"github"}
+
+        self._write(home, "disabled: [\n  - github\n")
+        assert get_disabled_skill_names() == {"github"}
+
