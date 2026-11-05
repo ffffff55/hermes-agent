@@ -659,6 +659,7 @@ gateway:
   picker:
     page_info: " ({start}–{end} من {total})"
   clarify:
+    recommended: "(موصى به)"
     hint_single: "أجب بالرقم، أو بنص الخيار، أو بإجابتك الخاصة."
     hint_multi: "يُسمح بتحديد أكثر من خيار — أجب بالأرقام مفصولة بفواصل أو مسافات (مثلًا \"1, 3\")، أو بنص الخيار، أو بإجابتك الخاصة."
     option_line: "  {index}. {choice}"

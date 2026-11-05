@@ -129,9 +129,10 @@ class TestClarifyRecommendedLabel:
     """The first choice is the agent's pick and is labelled as such.
 
     The schema tells the model to order choices best-first, so the tool tags
-    element 0 with "(Recommended)" at the one platform-agnostic entry point —
-    CLI, TUI, desktop, and messaging adapters all inherit the same label. The
-    label is presentation only: it never appears in the answer the agent reads.
+    element 0 with ``gateway.clarify.recommended`` (English "(Recommended)")
+    at the one platform-agnostic entry point — CLI, TUI, desktop, and messaging
+    adapters all inherit the same label. The label is presentation only: it
+    never appears in the answer the agent reads.
     """
 
     def test_first_choice_is_labelled(self):
@@ -196,6 +197,76 @@ class TestClarifyRecommendedLabel:
         response = result["responses"][0]
         assert response["choices_offered"] is None
         assert response["user_response"] == "whatever"
+
+    def test_english_default_marks_and_strips_case_variants(self, monkeypatch):
+        """Unset language (and an explicit en) keeps the English label."""
+        from agent import i18n
+        from tools.clarify_tool import RECOMMENDED_LABEL, mark_recommended, strip_recommended
+
+        monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
+        i18n.reset_language_cache()
+
+        def _no_config_language(home):
+            return None
+
+        _no_config_language.cache_clear = lambda: None
+        monkeypatch.setattr(i18n, "_config_language_cached", _no_config_language)
+        assert RECOMMENDED_LABEL == "(Recommended)"
+        assert mark_recommended(["Rebase", "Merge"]) == ["Rebase (Recommended)", "Merge"]
+        assert strip_recommended("Rebase (RECOMMENDED)") == "Rebase"
+        assert strip_recommended("Ship it (recommended)") == "Ship it"
+
+        monkeypatch.setenv("HERMES_LANGUAGE", "en")
+        i18n.reset_language_cache()
+        seen = []
+
+        def cb(questions):
+            seen.extend(questions[0]["choices"] or [])
+            return _reply({"q0": questions[0]["choices"][0]})
+
+        result = _ask(cb, [{"question": "Pick", "choices": ["Rebase", "Merge"]}])
+        assert seen == ["Rebase (Recommended)", "Merge"]
+        assert result["responses"][0]["user_response"] == "Rebase"
+        i18n.reset_language_cache()
+
+    def test_french_locale_marks_with_french_label_and_strips_both(self, monkeypatch):
+        """fr uses ``(recommandé)``; a copied English label still strips."""
+        from agent import i18n
+        from tools.clarify_tool import mark_recommended, strip_recommended
+
+        monkeypatch.setenv("HERMES_LANGUAGE", "fr")
+        i18n.reset_language_cache()
+        assert mark_recommended(["Rebase", "Merge"]) == ["Rebase (recommandé)", "Merge"]
+        assert mark_recommended(["Rebase (recommandé)", "Merge"]) == ["Rebase (recommandé)", "Merge"]
+        assert mark_recommended(["Rebase (Recommended)", "Merge"]) == ["Rebase (Recommended)", "Merge"]
+        assert strip_recommended("Rebase (recommandé)") == "Rebase"
+        assert strip_recommended("Rebase (Recommandé)") == "Rebase"
+        assert strip_recommended("Rebase (Recommended)") == "Rebase"
+        assert strip_recommended("Rebase (recommended)") == "Rebase"
+
+        def cb(questions):
+            assert questions[0]["choices"] == ["Rebase (recommandé)", "Merge"]
+            return _reply({"q0": "Rebase (Recommended)"})
+
+        result = _ask(cb, [{"question": "Pick", "choices": ["Rebase", "Merge"]}])
+        assert result["responses"][0]["user_response"] == "Rebase"
+        assert result["responses"][0]["choices_offered"] == ["Rebase", "Merge"]
+
+        def cb_fr(questions):
+            return _reply({"q0": questions[0]["choices"][0]})
+
+        result = _ask(cb_fr, [{"question": "Pick", "choices": ["Rebase", "Merge"]}])
+        assert result["responses"][0]["user_response"] == "Rebase"
+        i18n.reset_language_cache()
+
+    def test_catalog_miss_falls_back_to_english_constant(self, monkeypatch):
+        """A missing catalog key must not stamp the raw key onto a choice."""
+        from agent import i18n
+        from tools.clarify_tool import mark_recommended, strip_recommended
+
+        monkeypatch.setattr(i18n, "t", lambda key, lang=None, **kwargs: key)
+        assert mark_recommended(["Rebase", "Merge"]) == ["Rebase (Recommended)", "Merge"]
+        assert strip_recommended("Rebase (Recommended)") == "Rebase"
 
 
 class TestRegistryMultiSelectPassThrough:

@@ -659,6 +659,7 @@ gateway:
   picker:
     page_info: " ({start}–{end} / {total})"
   clarify:
+    recommended: "(Önerilen)"
     hint_single: "Numarayı, seçenek metnini veya kendi yanıtınızı yazın."
     hint_multi: "Birden fazla seçim yapılabilir — numaraları virgül veya boşlukla ayırarak (örn. \"1, 3\"), seçenek metnini veya kendi yanıtınızı yazın."
     option_line: "  {index}. {choice}"

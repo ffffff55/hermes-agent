@@ -11,25 +11,59 @@ MAX_QUESTIONS = 5  # independent questions per call
 # source, instead of a surface silently dropping a choice that ``choices_offered`` still reports as shown.
 MAX_CHOICE_CHARS = 8000
 # Applied to the first choice here (not per-surface) so every adapter renders it identically.
+# English stays a module constant: ``strip_recommended`` always removes it, so an answer copied
+# before a language change (or a model echoing the schema's English label) still comes back clean.
 RECOMMENDED_LABEL = "(Recommended)"
+_RECOMMENDED_KEY = "gateway.clarify.recommended"
 _UNAVAILABLE = "Clarify tool is not available in this execution context."
 _SHAPE = "Pass questions=[{question, choices?, multi_select?}]; a single question is a one-entry array."
 
 
+def _recommended_label() -> str:
+    """Active-locale suffix (``gateway.clarify.recommended``). The English constant is the
+    fallback when the catalog misses, so a raw key never lands on a choice."""
+    from agent.i18n import t
+
+    label = str(t(_RECOMMENDED_KEY) or "").strip()
+    if not label or label == _RECOMMENDED_KEY:
+        return RECOMMENDED_LABEL
+    return label
+
+
+def _strip_suffix(text: str, label: str) -> str | None:
+    """Drop a trailing ``label`` (case-insensitive) or return None.
+
+    Compares a tail of ``len(label)`` characters, so a casefold that changes length
+    (``ß`` → ``ss``) cannot slice the wrong span the way ``endswith`` on the folded
+    whole string would.
+    """
+    if not label or len(text) < len(label):
+        return None
+    if text[-len(label):].casefold() != label.casefold():
+        return None
+    return text[:-len(label)].strip()
+
+
 def mark_recommended(choices: list[str]) -> list[str]:
-    """Suffix the first choice (schema says best-first) with RECOMMENDED_LABEL; idempotent,
-    and a lone choice is left untouched (nothing to prefer it over)."""
+    """Suffix the first choice (schema says best-first) with the localized recommendation
+    label; idempotent, and a lone choice is left untouched (nothing to prefer it over)."""
     first = str(choices[0]).strip() if choices else ""
     if len(choices) < 2 or first != strip_recommended(first):
         return choices
-    return [f"{first} {RECOMMENDED_LABEL}"] + list(choices[1:])
+    return [f"{first} {_recommended_label()}"] + list(choices[1:])
 
 
 def strip_recommended(text: str) -> str:
-    """Remove the recommendation label so presentation never leaks into ``user_response``."""
+    """Remove the recommendation label so presentation never leaks into ``user_response``.
+
+    Strips the active locale's label and the English ``(Recommended)`` (any case).
+    """
     stripped = str(text).strip()
-    if stripped.casefold().endswith(RECOMMENDED_LABEL.casefold()):
-        return stripped[: -len(RECOMMENDED_LABEL)].strip()
+    labels = sorted({_recommended_label(), RECOMMENDED_LABEL}, key=len, reverse=True)
+    for label in labels:
+        cut = _strip_suffix(stripped, label)
+        if cut is not None:
+            return cut
     return stripped
 
 

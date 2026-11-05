@@ -659,6 +659,7 @@ gateway:
   picker:
     page_info: " （第 {start}–{end} 項，共 {total} 項）"
   clarify:
+    recommended: "（推薦）"
     hint_single: "請回覆編號、選項文字，或你自己的答案。"
     hint_multi: "可複選 — 請回覆以逗號或空格分隔的編號（例如「1, 3」）、選項文字，或你自己的答案。"
     option_line: "  {index}. {choice}"

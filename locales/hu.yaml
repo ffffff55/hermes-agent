@@ -669,6 +669,7 @@ gateway:
   picker:
     page_info: " ({start}–{end} / {total})"
   clarify:
+    recommended: "(Ajánlott)"
     hint_single: "Válaszolj a sorszámmal, az opció szövegével vagy a saját válaszoddal."
     hint_multi: "Több választás is lehetséges — válaszolj a sorszámokkal vesszővel vagy szóközzel elválasztva (pl. \"1, 3\"), az opció szövegével vagy a saját válaszoddal."
     option_line: "  {index}. {choice}"
