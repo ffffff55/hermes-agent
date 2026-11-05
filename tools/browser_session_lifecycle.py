@@ -147,8 +147,14 @@ def release_session_backend(cache_key: str, session_info: dict[str, Any]) -> Non
 def cleanup_single_session(cache_key: str) -> None:
     """Tear down one session by its exact key."""
     from tools.browser_session_cdp import stop_cdp_supervisor
-    stop_cdp_supervisor(cache_key)  # close our WebSocket BEFORE the backend tears the endpoint down
     bs = _bs()
+    stop_cdp_supervisor(cache_key)  # close our WebSocket BEFORE the backend tears the endpoint down
+    owner = bs.owner_task_id(cache_key)
+    # browser_exec's vault supervisor is keyed by the bare task id; a served-profile
+    # session is ``<task>@<home>``. Stop that owner before the endpoint is released
+    # (#148885). A bare ``::local`` sidecar is not tagged — its owner is the live session.
+    if owner != cache_key and "@" in cache_key:
+        stop_cdp_supervisor(owner)
     with bs._cleanup_lock:
         session_info = bs._active_sessions.pop(cache_key, None)
     _forget_session_tracking(cache_key)
@@ -160,7 +166,7 @@ def cleanup_single_session(cache_key: str) -> None:
 def cleanup_browser(task_id: Optional[str] = None) -> None:
     """Close the sessions serving ``task_id``: its exact key, its hybrid ``::local`` sidecar, and the
     served-profile-tagged keys browser_exec builds for it (``<task>@<home>``). Per-turn cleanup calls this
-    with the bare task id."""
+    with the bare task id. A tagged session also stops the bare-task vault supervisor."""
     task = task_id or "default"
     bs = _bs()
     with bs._cleanup_lock:
