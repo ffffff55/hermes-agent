@@ -600,6 +600,8 @@ class MCPServerTransportMixin:
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP (or SSE) transport."""
         _core._ensure_mcp_sdk()
+        # HTTP/SSE clients stay out of the stdio SDK load; bind them here.
+        _core._ensure_mcp_http_sdk()
         if not _core._MCP_HTTP_AVAILABLE:
             raise ImportError(f"MCP server '{self.name}' requires HTTP transport but "
                               "mcp.client.streamable_http is not available. "

@@ -12,12 +12,15 @@ call time (``_core``) and are imported directly by their callers."""
 import asyncio
 import contextvars
 import importlib
+import importlib.machinery
 import importlib.util
 import inspect
 import logging
 import os
+import sys
 import threading
 import time
+import types
 from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -83,8 +86,10 @@ LATEST_PROTOCOL_VERSION = "2025-03-26"
 # MCP-Protocol-Version header must be seeded from THIS one.
 LATEST_HANDSHAKE_VERSION = LATEST_PROTOCOL_VERSION
 
-# Importing ``mcp`` costs ~260ms, so it is deferred to first use (_ensure_mcp_sdk); availability
-# is decided now via find_spec so every ``if not _MCP_AVAILABLE`` gate / patch / skipif holds.
+# ``import mcp`` (and any ``mcp.*`` import) executes the package init, which on mcp 2.x
+# imports the server stack (starlette/uvicorn/sse_starlette) — seconds of cold start a
+# stdio client never uses. Availability is decided now via find_spec so every
+# ``if not _MCP_AVAILABLE`` gate / patch / skipif holds; symbols load on first use.
 try:
     _MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
 except Exception:
@@ -111,25 +116,95 @@ _OPTIONAL_TYPE_FAMILIES = (
 )
 # Bound by _ensure_mcp_sdk(); module __getattr__ (PEP 562) imports the SDK on first external
 # access so mock.patch("tools.mcp_tool.stdio_client") sees a real original, never clobbered.
+# HTTP client callables are a separate gate (_ensure_mcp_http_sdk): a stdio-only load must
+# not import them.
 _MCP_SDK_LAZY_SYMBOLS = frozenset(
-    {"StdioServerParameters", "stdio_client", "streamablehttp_client", "streamable_http_client"}
+    {"StdioServerParameters", "stdio_client"}
     | {n for _mod, names, _msg in _OPTIONAL_TYPE_FAMILIES for n in names})
+_MCP_HTTP_LAZY_SYMBOLS = frozenset({"streamablehttp_client", "streamable_http_client"})
+# Names ``from mcp import ...`` still has to resolve after we skip the package init
+# (computer-use's stdio session imports ClientSession and StdioServerParameters that way).
+_MCP_STUB_REEXPORTS = frozenset({"ClientSession", "StdioServerParameters", "stdio_client"})
+_MCP_HTTP_IMPORT_ATTEMPTED = False
+_MCP_STUB_LOCK = threading.Lock()
+_MCP_IMPORT_STUB_IDS: set[int] = set()
+
+
+def _is_mcp_import_stub(mod: Any) -> bool:
+    return mod is not None and id(mod) in _MCP_IMPORT_STUB_IDS
+
+
+def _seed_mcp_package(name: str, directory: str) -> types.ModuleType:
+    """Path-only package so submodule imports do not run its ``__init__.py``.
+
+    ``__spec__`` has to be set: once the name is in ``sys.modules``,
+    ``importlib.util.find_spec`` returns that spec and raises if it is
+    missing. The loader stays unset so nothing re-executes the package init.
+    """
+    mod = types.ModuleType(name)
+    origin = os.path.join(directory, "__init__.py")
+    spec = importlib.machinery.ModuleSpec(name, loader=None, origin=origin, is_package=True)
+    spec.submodule_search_locations = [directory]
+    mod.__spec__ = spec
+    mod.__path__ = spec.submodule_search_locations
+    mod.__package__ = name
+    mod.__file__ = origin
+    _MCP_IMPORT_STUB_IDS.add(id(mod))
+    sys.modules[name] = mod
+    return mod
+
+
+def _install_mcp_client_stubs() -> None:
+    """Let ``mcp.client`` / ``mcp.types`` import without the package inits.
+
+    On mcp 2.x, ``mcp/__init__.py`` and ``mcp/client/__init__.py`` import the
+    server (starlette/uvicorn/sse_starlette). Stdio only needs
+    ``mcp.client.session`` and ``mcp.client.stdio``; those modules themselves
+    do not import the server. Seeding ``sys.modules`` with path-only packages
+    skips the inits. A package whose init already ran is left in place.
+    """
+    existing = sys.modules.get("mcp")
+    if existing is not None and not _is_mcp_import_stub(existing):
+        return
+    with _MCP_STUB_LOCK:
+        existing = sys.modules.get("mcp")
+        if existing is not None and not _is_mcp_import_stub(existing):
+            return
+        if existing is None:
+            spec = importlib.util.find_spec("mcp")
+            if spec is None or not spec.submodule_search_locations:
+                return
+            existing = _seed_mcp_package("mcp", spec.submodule_search_locations[0])
+        if "mcp.client" not in sys.modules:
+            client = _seed_mcp_package("mcp.client", os.path.join(existing.__path__[0], "client"))
+            existing.client = client
 
 
 def __getattr__(name: str):
-    if name in _MCP_SDK_LAZY_SYMBOLS:
+    if name in _MCP_HTTP_LAZY_SYMBOLS:
+        _ensure_mcp_http_sdk()
+    elif name in _MCP_SDK_LAZY_SYMBOLS:
         _ensure_mcp_sdk()
-        try:
-            return globals()[name]
-        except KeyError:
-            pass  # SDK missing or symbol absent on this SDK build
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    try:
+        return globals()[name]
+    except KeyError:
+        pass  # SDK missing or symbol absent on this SDK build
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _import_sdk_names(module: str, names: tuple, missing_msg: Optional[str] = None) -> bool:
     """Bind ``names`` from SDK ``module`` into this module's globals; False (nothing bound,
-    optional debug line) when this SDK build lacks the module or any of the names."""
+    optional debug line) when this SDK build lacks the module or any of the names.
+
+    Submodule imports go through the path-only package stubs so they do not
+    execute ``mcp/__init__.py``. The top-level ``mcp`` package is not a client
+    import path: its init is what pulls the ASGI server stack.
+    """
     try:
+        if module.startswith("mcp."):
+            _install_mcp_client_stubs()
         mod = importlib.import_module(module)
         values = {n: getattr(mod, n) for n in names}
     except (ImportError, AttributeError):
@@ -137,15 +212,27 @@ def _import_sdk_names(module: str, names: tuple, missing_msg: Optional[str] = No
             logger.debug(missing_msg)
         return False
     globals().update(values)
+    pkg = sys.modules.get("mcp")
+    if _is_mcp_import_stub(pkg):
+        for name, value in values.items():
+            if name in _MCP_STUB_REEXPORTS:
+                setattr(pkg, name, value)
     return True
 
 
 def _ensure_mcp_sdk() -> bool:
-    """Import the optional ``mcp`` SDK on first use; return availability. Idempotent and
-    thread-safe; honors a test-patched ``_MCP_AVAILABLE=False`` (no import) and pre-installed
-    mocks (``ClientSession`` already set means no re-import)."""
-    global _MCP_SDK_IMPORT_ATTEMPTED, _MCP_AVAILABLE, _MCP_HTTP_AVAILABLE, _MCP_NEW_HTTP, _MCP_LEGACY_HTTP
-    global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES, sse_client
+    """Import the stdio client SDK on first use; return availability.
+
+    Idempotent and thread-safe; honors a test-patched ``_MCP_AVAILABLE=False``
+    (no import) and pre-installed mocks (``ClientSession`` already set means no
+    re-import). Loads ``ClientSession`` from ``mcp.client.session`` and
+    ``StdioServerParameters`` / ``stdio_client`` from ``mcp.client.stdio`` —
+    never the top-level ``mcp`` package, whose init imports the ASGI server.
+    HTTP/SSE clients are not loaded here; ``_ensure_mcp_http_sdk`` does that
+    when a remote transport is actually used.
+    """
+    global _MCP_SDK_IMPORT_ATTEMPTED, _MCP_AVAILABLE
+    global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES
     global _MCP_MESSAGE_HANDLER_SUPPORTED, _MCP_LOGGING_CALLBACK_SUPPORTED, LATEST_HANDSHAKE_VERSION
     global _JSONRPC_METHOD_NOT_FOUND
     if not _MCP_AVAILABLE:
@@ -155,27 +242,22 @@ def _ensure_mcp_sdk() -> bool:
     with _MCP_SDK_IMPORT_LOCK:
         if _MCP_SDK_IMPORT_ATTEMPTED or ClientSession is not None:
             return _MCP_AVAILABLE
-        if (_import_sdk_names("mcp", ("ClientSession", "StdioServerParameters"))
-                and _import_sdk_names("mcp.client.stdio", ("stdio_client",))):
+        if (_import_sdk_names("mcp.client.session", ("ClientSession",))
+                and _import_sdk_names("mcp.client.stdio", ("StdioServerParameters", "stdio_client"))):
             _MCP_AVAILABLE = True
-            # mcp >= 1.24 ships streamable_http_client; 2.0 dropped the deprecated
-            # streamablehttp_client alias. Either one gives HTTP.
-            _MCP_NEW_HTTP = _import_sdk_names("mcp.client.streamable_http", ("streamable_http_client",))
-            _MCP_LEGACY_HTTP = _import_sdk_names("mcp.client.streamable_http", ("streamablehttp_client",))
-            _MCP_HTTP_AVAILABLE = _MCP_NEW_HTTP or _MCP_LEGACY_HTTP
             _import_sdk_names("mcp.types", ("LATEST_PROTOCOL_VERSION",),
                               "mcp.types.LATEST_PROTOCOL_VERSION not available -- using fallback protocol version")
             if not _import_sdk_names("mcp.client.session", ("LATEST_HANDSHAKE_VERSION",)):
                 # Pre-2.x SDKs: newest revision IS the handshake revision.
                 LATEST_HANDSHAKE_VERSION = LATEST_PROTOCOL_VERSION
-            if not _import_sdk_names("mcp.client.sse", ("sse_client",),
-                                     "mcp.client.sse.sse_client not available -- SSE transport disabled"):
-                sse_client = None
             _MCP_SAMPLING_TYPES, _MCP_ELICITATION_TYPES, _MCP_NOTIFICATION_TYPES = [
                 _import_sdk_names(*family) for family in _OPTIONAL_TYPE_FAMILIES]
         else:
             logger.debug("mcp package not installed -- MCP tool support disabled")
         if _MCP_AVAILABLE:
+            # Failure path (narrow imports missed) still must not execute the
+            # package init just to read this constant.
+            _install_mcp_client_stubs()
             try:
                 _JSONRPC_METHOD_NOT_FOUND = importlib.import_module("mcp.types").METHOD_NOT_FOUND
             except Exception:  # pragma: no cover — SDK without the constant
@@ -186,6 +268,32 @@ def _ensure_mcp_sdk() -> bool:
         _MCP_LOGGING_CALLBACK_SUPPORTED = _client_session_accepts("logging_callback")
         _MCP_SDK_IMPORT_ATTEMPTED = True
         return _MCP_AVAILABLE
+
+
+def _ensure_mcp_http_sdk() -> bool:
+    """Import Streamable HTTP and SSE clients. Not part of the stdio load.
+
+    mcp >= 1.24 ships ``streamable_http_client``; 2.0 dropped the deprecated
+    ``streamablehttp_client`` alias. Either one gives HTTP. Idempotent; a
+    test-patched ``_MCP_AVAILABLE=False`` imports nothing, and once attempted
+    the flags are not rewritten (so a mid-test patch of them sticks).
+    """
+    global _MCP_HTTP_IMPORT_ATTEMPTED, _MCP_HTTP_AVAILABLE, _MCP_NEW_HTTP, _MCP_LEGACY_HTTP, sse_client
+    if not _MCP_AVAILABLE:
+        return False
+    if _MCP_HTTP_IMPORT_ATTEMPTED:
+        return _MCP_HTTP_AVAILABLE
+    with _MCP_SDK_IMPORT_LOCK:
+        if _MCP_HTTP_IMPORT_ATTEMPTED:
+            return _MCP_HTTP_AVAILABLE
+        _MCP_NEW_HTTP = _import_sdk_names("mcp.client.streamable_http", ("streamable_http_client",))
+        _MCP_LEGACY_HTTP = _import_sdk_names("mcp.client.streamable_http", ("streamablehttp_client",))
+        _MCP_HTTP_AVAILABLE = bool(_MCP_NEW_HTTP or _MCP_LEGACY_HTTP)
+        if not _import_sdk_names("mcp.client.sse", ("sse_client",),
+                                 "mcp.client.sse.sse_client not available -- SSE transport disabled"):
+            sse_client = None
+        _MCP_HTTP_IMPORT_ATTEMPTED = True
+        return _MCP_HTTP_AVAILABLE
 
 
 _SDK_HTTPX_MOD = None
@@ -200,6 +308,9 @@ def sdk_httpx():
     if _SDK_HTTPX_MOD is not None:
         return _SDK_HTTPX_MOD
     try:
+        # Same stub as the stdio load: ``from mcp.client import ...`` would
+        # otherwise execute the package inits and pull the ASGI server stack.
+        _install_mcp_client_stubs()
         from mcp.client import streamable_http as _transport
         _SDK_HTTPX_MOD = getattr(_transport, "httpx2", None) or getattr(_transport, "httpx", None)
     except ImportError:
