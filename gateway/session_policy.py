@@ -603,10 +603,12 @@ def _apply_launch_overrides(params, config):
             if not isinstance(value, str) or not value.strip():
                 _refuse(key, 'must be a non-empty string')
             if key == 'base_url':
+                # process:// is an external_process route. Desktop echoes the stored
+                # base_url on session.resume (#149114). Other schemes stay refused.
                 url = urlsplit(value)
-                if (url.scheme not in {'http', 'https'} or not url.hostname
+                if (url.scheme not in {'http', 'https', 'process'} or not url.hostname
                         or url.username or url.password or url.query or url.fragment):
-                    _refuse('base_url', 'must be an http(s) URL without credentials, query or fragment')
+                    _refuse('base_url', 'must be an http(s) or process URL without credentials, query or fragment')
             config.setdefault('model', {})[key] = value
     bad_flag = next((flag for flag in ('ignore_rules', 'yolo', 'checkpoints', 'accept_hooks', 'pass_session_id',
                                       'follow_profile_config', 'cwd_explicit', 'verbose')

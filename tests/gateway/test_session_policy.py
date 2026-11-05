@@ -143,6 +143,44 @@ def test_launch_options_are_frozen_and_validated(tmp_path):
             build_policy(dict(cwd=str(tmp_path), **bad), cfg)
 
 
+def test_process_base_url_is_a_valid_launch_override(tmp_path):
+    """``process://`` is the external_process route. Desktop echoes the stored base_url on
+    session.resume, so the launch override accepts it with a named provider (#149114).
+
+    A process URL still needs a hostname and still refuses credentials, a query or a fragment.
+    ``moa://`` and other non-http schemes stay refused. http(s) acceptance and refusal are unchanged.
+    """
+    from gateway.session_policy import build_policy
+    from hermes_state_runtime import RuntimeStoreError
+
+    provider = 'claude-subscription-directsdk-experimental'
+    accepted = 'process://claude-subscription-directsdk-experimental'
+    policy = build_policy(dict(cwd=str(tmp_path), provider=provider, base_url=accepted), {})
+    assert (policy.provider, policy.base_url) == (provider, accepted)
+
+    for good in ('http://127.0.0.1:1234/v1', 'https://127.0.0.1:1234/v1'):
+        built = build_policy(dict(cwd=str(tmp_path), provider='custom', base_url=good), {})
+        assert built.base_url == good
+
+    detail = 'must be an http(s) or process URL without credentials, query or fragment'
+    refused = (
+        'process://user:secret@claude-subscription-directsdk-experimental',
+        'process://claude-subscription-directsdk-experimental?x=1',
+        'process://claude-subscription-directsdk-experimental#frag',
+        'process:///missing-host',
+        'moa://local',
+        'acp://acme',
+        'ftp://example.invalid',
+        'http://user:secret@127.0.0.1:1234/v1',
+        'https://127.0.0.1:1234/v1?x=1',
+        'https://127.0.0.1:1234/v1#frag',
+    )
+    for bad in refused:
+        with pytest.raises(RuntimeStoreError, match='invalid_params') as caught:
+            build_policy(dict(cwd=str(tmp_path), provider=provider, base_url=bad), {})
+        assert (caught.value.field, caught.value.detail) == ('base_url', detail), bad
+
+
 def test_provider_override_drops_the_previous_providers_route(tmp_path):
     """A provider pick is a whole-route change: folding it must not keep the profile's
     endpoint/wire-protocol/credential pointers, else the new provider's key is sent to the old
