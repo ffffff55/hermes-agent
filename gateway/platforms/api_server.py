@@ -3040,7 +3040,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_session_chat(self, request: web.Request) -> web.Response:
         """POST /api/sessions/{session_id}/chat — one synchronous agent turn (plus the delivery lanes'
         one bounded re-run of a transient failure; ``hermes peer dm`` is the client)."""
-        from tools.bot_failure_reasons import RETRY_NONE, result_retry_action
         # This turn runs through _run_agent, so it already COUNTS toward the cap (#7483).
         # Spending the budget without checking it refused every other caller while never
         # refusing this route — and a fleet's cross-machine DMs all arrive here.
@@ -3054,22 +3053,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         handed_off = await self._answer_through_live_bot_chat(ctx)
         if handed_off is not None:
             return handed_off
+        from gateway.platforms.api_server_session_chat import run_session_chat_turn
+        outcome = await run_session_chat_turn(self, ctx)
+        if isinstance(outcome, web.Response):
+            return outcome
+        result, usage = outcome
         gateway_session_key = ctx["gateway_session_key"]
         session_id = ctx["session_id"]
-        history = await self._conversation_history_for_session(session_id)
-        result, usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
-        # One policy-gated re-run of a transiently failed turn — the peer-DM transport's half of the
-        # retry the local (``tools.bot_mode_dm``) and relayed (``tui_gateway.methods_bot_relay``)
-        # delivery lanes already apply (#93091 item 5, #115325). Same policy, same gate: transient
-        # classes (429 / 5xx) re-run the SAME session once, a context overflow lets the re-run's
-        # pre-API compaction shrink the transcript first, and auth/quota/config/model never re-run. The
-        # store is read again first: the failed attempt's turn-start persist left the DM as the
-        # transcript's unanswered tail row, and the re-run resumes that row instead of appending a
-        # second copy of it. A turn that fails again reaches the peer client exactly as before.
-        if result_retry_action(result) != RETRY_NONE:
-            history = await self._conversation_history_for_session(session_id)
-            result, usage = await self._run_agent(
-                conversation_history=history, resume_unanswered_turn=True, **ctx["run_kwargs"])
         is_dict = isinstance(result, dict)
         effective_session_id = result.get("session_id") if is_dict else session_id
         final_response = _resolve_media_to_data_urls(
