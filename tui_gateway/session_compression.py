@@ -83,6 +83,30 @@ _COMPRESSION_INT_KEYS = (
 )
 
 
+def _live_codex_compact_threshold(compression: dict) -> int | None:
+    """Match ``agent_init._compression_codex_settings``.
+
+    A missing key and an explicit null (the shipped template default) stay
+    unset so ``resolve_compact_threshold`` can follow the local trigger. Pinning
+    ``200000`` here makes that fallback an absolute threshold and skips the
+    derivation (#149923). A present value that is not a positive integer warns
+    and stays automatic; an explicit positive integer stays absolute.
+    """
+    raw = compression.get("codex_responses_compact_threshold")
+    if raw is None:
+        return None
+    from agent.agent_init import _positive_int
+
+    parsed = _positive_int(raw, reject=(bool, float))
+    if parsed is None:
+        logger.warning(
+            "Invalid compression.codex_responses_compact_threshold=%r; "
+            "using the automatic threshold derived from local compression.",
+            raw,
+        )
+    return parsed
+
+
 def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     """Update a live session's compressor in place from config.yaml. Every adopted key has UNSET semantics:
     a removed key restores the normalized default (or model-derived value) through the construction
@@ -100,14 +124,7 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     enabled_raw = compression.get("enabled", True)
     agent.compression_enabled = enabled_raw if isinstance(enabled_raw, bool) else str(enabled_raw).lower() in {"true", "1", "yes"}
     agent.codex_responses_native_compaction = is_truthy_value(compression.get("codex_responses_native", False))
-    native_threshold_raw = compression.get("codex_responses_compact_threshold", 200_000)
-    try:
-        if isinstance(native_threshold_raw, bool) or (native_threshold := int(native_threshold_raw)) <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        logger.warning("Invalid compression.codex_responses_compact_threshold=%r; using 200000.", native_threshold_raw)
-        native_threshold = 200_000
-    agent.codex_responses_compact_threshold = native_threshold
+    agent.codex_responses_compact_threshold = _live_codex_compact_threshold(compression)
     # Absence restores the agent_init/config default (0 = disabled).
     with contextlib.suppress(TypeError, ValueError):
         agent.compression_idle_compact_after_seconds = max(0, int(compression.get("idle_compact_after_seconds", 0) or 0))
