@@ -164,7 +164,40 @@ def test_anthropic_fetch_honors_explicit_api_key_and_marks_model_scoped_windows(
     assert scopes == {"Current session": "account", "Current week": "account",
                       "Opus week": "model", "Sonnet week": "model"}
     percents = {w.label: w.used_percent for w in snapshot.windows}
-    assert percents["Opus week"] == 100.0 and percents["Current session"] == 30.0
+    # Utilization is already a percent; 0.3 stays 0.3 and 1.0 stays 1.0 (#149828).
+    assert percents == {
+        "Current session": 0.3, "Current week": 0.2, "Opus week": 1.0, "Sonnet week": 0.4,
+    }
+
+
+def test_anthropic_oauth_utilization_is_already_percent(monkeypatch):
+    """Regression for #149828: the OAuth usage endpoint returns percent.
+
+    A real 1% (utilization 1.0) and 0.5% must stay 1.0 and 0.5. Values above 1,
+    such as 3.0, stay unchanged as well. Only the HTTP payload is replaced.
+    """
+    cases = (
+        ("seven_day", "Current week", 1.0),
+        ("seven_day", "Current week", 0.5),
+        ("five_hour", "Current session", 3.0),
+    )
+    pending: dict = {}
+    calls: list[str] = []
+
+    def fake_get_json(url, headers, *, timeout):
+        calls.append(url)
+        key, utilization = pending["case"]
+        return {key: {"utilization": utilization, "resets_at": "2026-10-08T12:00:00Z"}}
+
+    monkeypatch.setattr(account_usage, "_get_json", fake_get_json)
+    for key, label, utilization in cases:
+        pending["case"] = (key, utilization)
+        snapshot = fetch_account_usage("anthropic", api_key="sk-ant-oat-explicit-token")
+        assert snapshot is not None
+        assert calls[-1] == "https://api.anthropic.com/api/oauth/usage"
+        matched = [w for w in snapshot.windows if w.label == label]
+        assert len(matched) == 1
+        assert matched[0].used_percent == utilization
 
 
 def test_read_only_fetch_remembered_under_identity_slot(monkeypatch, tmp_path):

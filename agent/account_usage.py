@@ -858,9 +858,11 @@ def _fetch_anthropic_account_usage(
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
     payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
+    # The OAuth usage endpoint already returns utilization in percent (#149828).
+    # Scaling values <= 1 would turn a real 1% into 100%.
     windows = _usage_windows(
         payload, (("five_hour", "Current session"), ("seven_day", "Current week"), ("seven_day_opus", "Opus week"),
-                  ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,
+                  ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at",
         model_scoped={"seven_day_opus", "seven_day_sonnet"},
     )
     details: list[str] = []
