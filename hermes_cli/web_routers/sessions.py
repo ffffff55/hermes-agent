@@ -684,6 +684,7 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     from agent.context_compressor import is_compaction_summary_message
     from agent.conversation_compression import _extract_steer_text_from_message
     from agent.history_commentary import project_history_commentary
+    from agent.memory_context import scrub_assistant_message_for_display
     from agent.message_metadata import withheld_prompt_text
     from agent.prompt_builder import STEER_DISPLAY_KIND
     from agent.turn_failure_copy import CONTENT_REFUSED_DISPLAY_KIND, untyped_failed_turn_display_kind
@@ -705,6 +706,9 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
         message = _with_tool_call_labels(message)
         if coerce is not None:
             message = coerce(message)
+        # REST hydration paints ``content`` (Desktop prefers ``display_content`` when set).
+        # Same scrub as session.resume; the caller's stored row is not mutated (#149933).
+        message = scrub_assistant_message_for_display(message)
         # Same read-side typing as session.resume (tui_gateway/session_history.py).
         failed_turn = not message.get("display_kind") and untyped_failed_turn_display_kind(
             message.get("role"), message.get("content"))

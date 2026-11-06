@@ -6,7 +6,13 @@ regex can't survive chunk boundaries, so _fire_stream_delta routes deltas
 through a stateful scrubber.
 """
 
-from agent.memory_context import StreamingContextScrubber, sanitize_context
+from agent.memory_context import (
+    StreamingContextScrubber,
+    sanitize_context,
+    scrub_assistant_display_text,
+    scrub_assistant_message_for_display,
+    scrub_memory_context_for_display,
+)
 
 
 class TestStreamingContextScrubberBasics:
@@ -106,6 +112,80 @@ class TestStreamingContextScrubberCaseInsensitivity:
         )
         assert out == "visible"
         assert "secret" not in out
+
+
+class TestScrubMemoryContextForDisplay:
+    """Whole-message display uses the stream scrubber, including an open fence (#149933)."""
+
+    def test_complete_fence_drops_the_span(self):
+        raw = (
+            "Before.\n\n<memory-context>\nsecret fact\n</memory-context>\n\nAfter."
+        )
+        out = scrub_memory_context_for_display(raw)
+        assert out.startswith("Before.")
+        assert "After." in out
+        assert "secret fact" not in out
+        assert "<memory-context>" not in out
+
+    def test_unterminated_fence_drops_the_suffix(self):
+        note = "[System context note - internal memory injection metadata]"
+        raw = f"Normal assistant reply.\n\n<memory-context>\n{note}"
+        out = scrub_memory_context_for_display(raw)
+        assert out.startswith("Normal assistant reply.")
+        assert note not in out
+        assert "memory-context" not in out.lower()
+
+    def test_unterminated_fence_matches_chunked_stream(self):
+        chunks = ["Normal assistant reply.\n\n<mem", "ory-context>\n", "internal note"]
+        live = StreamingContextScrubber()
+        streamed = "".join(live.feed(chunk) for chunk in chunks) + live.flush()
+        assert scrub_memory_context_for_display("".join(chunks)) == streamed
+        assert "internal note" not in streamed
+
+    def test_inline_and_code_mentions_stay(self):
+        prose = "The <memory-context> tag name is documented here."
+        code = "In docs, write `<memory-context>` when you mean the fence."
+        block = "Document it as:\n`<memory-context>`\nand leave the example visible."
+        assert scrub_memory_context_for_display(prose) == prose
+        assert scrub_memory_context_for_display(code) == code
+        assert scrub_memory_context_for_display(block) == block
+
+    def test_inline_mention_survives_beside_a_real_fence(self):
+        raw = (
+            "See `<memory-context>` in the docs.\n\n"
+            "<memory-context>\nsecret note\n</memory-context>\n"
+        )
+        out = scrub_memory_context_for_display(raw)
+        assert out.startswith("See `<memory-context>` in the docs.")
+        assert "secret note" not in out
+
+    def test_uppercase_unterminated_fence_is_scrubbed(self):
+        raw = "Answer.\n\n<MEMORY-CONTEXT>\nSECRET"
+        out = scrub_memory_context_for_display(raw)
+        assert out.startswith("Answer.")
+        assert "SECRET" not in out
+
+    def test_plain_text_is_unchanged(self):
+        assert scrub_memory_context_for_display("hello world") == "hello world"
+
+    def test_only_assistant_role_text_is_scrubbed(self):
+        raw = "Ask.\n\n<memory-context>\nsecret"
+        assert scrub_assistant_display_text("user", raw) == raw
+        assert "secret" not in scrub_assistant_display_text("assistant", raw)
+
+    def test_hidden_message_and_input_row_stay_raw(self):
+        raw = "Answer.\n\n<memory-context>\nsecret"
+        hidden = {"role": "assistant", "display_kind": "hidden", "content": raw}
+        assert scrub_assistant_message_for_display(hidden) is hidden
+        user = {"role": "user", "content": raw}
+        assert scrub_assistant_message_for_display(user) is user
+        row = {"role": "assistant", "content": raw, "api_content": raw}
+        projected = scrub_assistant_message_for_display(row)
+        assert row["content"] == raw
+        assert row["api_content"] == raw
+        assert projected is not row
+        assert "secret" not in projected["content"]
+        assert projected["api_content"] == raw
 
 
 class TestSanitizeContextUnchanged:

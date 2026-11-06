@@ -298,6 +298,7 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
     """``image_urls=False`` is the ``inline_images=false`` projection (#116511): image parts render ``[image]``
     so a remote client's history read stays kilobytes instead of re-transmitting every stored attachment."""
     from agent.history_commentary import project_history_commentary
+    from agent.memory_context import scrub_assistant_display_text
     from agent.message_metadata import withheld_prompt_text
 
     messages = []
@@ -344,6 +345,9 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
                                 if m.get(key) is not None},
                              **({"args": args} if args else {}), **({"labels": labels} if labels else {})})
             continue
+        # Stored assistant bytes stay raw for replay. Display uses the stream scrubber so an
+        # unterminated <memory-context> fence does not rehydrate into the transcript (#149933).
+        content_text = scrub_assistant_display_text(role, content_text)
         # Assistant detail sidecars can carry the only visible reply or reasoning after resume/reload.
         has_assistant_detail = role == "assistant" and any(m.get(key) for key in _HISTORY_ASSISTANT_DETAIL_KEYS)
         if not content_text.strip() and not has_assistant_detail:

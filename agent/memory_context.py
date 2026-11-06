@@ -2,7 +2,9 @@
 
 ``build_memory_context_block`` fences prefetched recall for the prompt; ``sanitize_context`` and
 ``StreamingContextScrubber`` strip those fences (and anything a provider pre-wrapped) from text that
-leaves the agent. Pure text formatting: no provider calls, no profile state.
+leaves the agent. ``scrub_memory_context_for_display`` applies the stream scrubber to one finished
+message so history hydration hides an unterminated fence without rewriting stored bytes. Pure text
+formatting: no provider calls, no profile state.
 """
 
 from __future__ import annotations
@@ -113,6 +115,68 @@ class StreamingContextScrubber:
         if text:
             out.append(text)
             self._at_block_boundary = self._ends_at_block_boundary(text)
+
+
+def scrub_memory_context_for_display(text: str) -> str:
+    """Hide block-boundary memory fences in one complete message, including an open fence.
+
+    ``sanitize_context`` only drops a span that has both tags, then strips leftover tag
+    text, so an opening fence with no close leaves its note visible. The live stream
+    already discards that span: feed the whole message and flush. An inline or code
+    mention of the tag is not a block boundary and stays. Stored and replay bytes are
+    not this function's concern — callers project a copy.
+    """
+    if not text or "memory-context" not in text.lower():
+        return text
+    scrubber = StreamingContextScrubber()
+    return scrubber.feed(text) + scrubber.flush()
+
+
+def scrub_assistant_display_text(role: str, text: str) -> str:
+    """Transcript display text. Only assistant rows are scrubbed; other roles pass through."""
+    if role != "assistant" or not isinstance(text, str):
+        return text
+    return scrub_memory_context_for_display(text)
+
+
+def scrub_assistant_message_for_display(message: dict) -> dict:
+    """Display copy of one row. Hidden and non-assistant rows are returned unchanged.
+
+    The input dict is not mutated, so a stored row passed through a projector stays
+    byte-identical for replay.
+    """
+    if message.get("role") != "assistant" or message.get("display_kind") == "hidden":
+        return message
+    content = message.get("content")
+    scrubbed = _scrub_display_content(content)
+    if scrubbed == content:
+        return message
+    projected = message.copy()
+    projected["content"] = scrubbed
+    return projected
+
+
+def _scrub_display_content(content):
+    """Scrub a string or the text parts of a content list; any other shape is unchanged."""
+    if isinstance(content, str):
+        return scrub_memory_context_for_display(content)
+    if not isinstance(content, list):
+        return content
+    parts: list = []
+    changed = False
+    for part in content:
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            text = scrub_memory_context_for_display(part["text"])
+            if text != part["text"]:
+                part = {**part, "text": text}
+                changed = True
+        elif isinstance(part, str):
+            text = scrub_memory_context_for_display(part)
+            if text != part:
+                part = text
+                changed = True
+        parts.append(part)
+    return parts if changed else content
 
 
 # A markdown bullet: a marker, whitespace, then content. The whitespace matters — it is what keeps
