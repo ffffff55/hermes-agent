@@ -473,7 +473,11 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     session_key = session.get("session_key")
     session_id = getattr(agent, "session_id", None) or session_key
     # Returned to the client by ``session.close`` (the TUI shows them after its /new reset); reaper paths have no client.
-    session["_end_msgs"] = _notify_session_boundary("on_session_finalize", session_id, _session_source(session)) or []
+    # The finalize dispatch is the same out-of-turn callback class as the on_session_end block above: plugin hooks
+    # may read profile-scoped secrets at call time, so it runs inside the session's bound profile scope or it
+    # fails closed under multiplex (UnscopedSecretError on a scoped secret read).
+    with _session_profile_runtime_scope(session):
+        session["_end_msgs"] = _notify_session_boundary("on_session_finalize", session_id, _session_source(session)) or []
     # End the state.db row so it doesn't linger as a ghost in /resume. Use session_id (agent.session_id), not
     # session_key: after compression the key may be the stale ended parent while session_id is the live continuation.
     # Fix for #20001.
