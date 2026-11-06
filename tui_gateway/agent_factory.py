@@ -236,7 +236,48 @@ def _persist_live_session_runtime(session: dict | None) -> None:
         elif model and hasattr(db, "update_session_model"):
             db.update_session_model(session_key, model)
     except Exception:
-        logger.debug("failed to persist live session runtime", exc_info=True)
+        # A debug line here is how a switch looked applied while the row stayed on the old route.
+        logger.warning("failed to persist live session runtime", exc_info=True)
+
+
+def _persist_agentless_session_route(session: dict | None, result) -> None:
+    """Write a resolved switch into the session row when no agent is live.
+
+    Composer picks carry ``--provider`` and deliberately skip the pre-build
+    (#42241), so ``_persist_live_session_runtime`` — which reads the agent —
+    never runs. ``update_session_model`` is the writer that stores the route in
+    both shapes resume reads: top-level keys and nested ``gateway_runtime``
+    (the reader prefers the nested one when it names a provider). A top-level-only
+    write would leave a canonical ``local-<hash>`` row on its old gateway route
+    (#149870). The api key stays off the row, same as the live-agent persist.
+    """
+    session_key = str((session or {}).get("session_key") or "").strip()
+    model = str(getattr(result, "new_model", "") or "").strip()
+    if not session_key or not model:
+        return
+    provider = str(getattr(result, "target_provider", "") or "").strip() or None
+    try:
+        if _ensure_session_db_row(session) is False:
+            logger.warning(
+                "failed to persist agentless model switch for %s: session db unavailable", session_key)
+            return
+        with _session_db(session) as db:
+            if db is None:
+                logger.warning(
+                    "failed to persist agentless model switch for %s: session db unavailable", session_key)
+                return
+            target = _submit_row_target_key(session)
+            db.update_session_model(
+                target, model, provider,
+                base_url=getattr(result, "base_url", None) or None,
+                api_mode=getattr(result, "api_mode", None) or None)
+            if "composer_override_profile" in session:
+                profile = session.get("composer_override_profile")
+                db.patch_session_model_config(target, {
+                    "composer_override_profile": profile if isinstance(profile, dict) else None})
+    except Exception:
+        logger.warning("failed to persist agentless session route for %s", session_key, exc_info=True)
+
 
 def _load_approval_mode() -> str:
     """Effective ``approvals.mode`` via the gate's own ``_get_approval_mode`` (a raw re-read missed the

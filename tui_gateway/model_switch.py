@@ -311,6 +311,22 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
         session.pop("one_turn_model_restore", None)
 
 
+def _commit_agentless_switch(session: dict, result, *, one_turn: bool, pin_session_override: bool) -> None:
+    """Durable session switch with no live agent: pin the row and the transcript marker.
+
+    ``/model --once`` already refuses without an agent. An internal adopt
+    (``pin_session_override=False``) must not invent a session pin. A draft with
+    no ``session_key`` still only has the in-memory override; the first row
+    create reads that. The marker needs the key plus a db handle, not an agent.
+    """
+    if one_turn or not pin_session_override or not isinstance(session, dict):
+        return
+    if not str(session.get("session_key") or "").strip():
+        return
+    _persist_agentless_session_route(session, result)
+    _append_model_switch_marker(session, model=result.new_model, provider=result.target_provider)
+
+
 LARGE_MODEL_NOTICE_KEY = "model.large_notice"
 
 
@@ -371,6 +387,11 @@ def _apply_model_switch(
         if agent:
             # Provenance must exist before this transaction persists the switched runtime.
             _commit_agent_switch(sid, session, agent, result, current_model, restore_snapshot)
+        else:
+            # Explicit ``--provider`` skips the pre-build on purpose (#42241). The row
+            # and the marker still have to land or resume reverts to the profile route (#149870).
+            _commit_agentless_switch(
+                session, result, one_turn=one_turn, pin_session_override=pin_session_override)
     except Exception:
         if records_composer_override:
             if had_composer_profile:

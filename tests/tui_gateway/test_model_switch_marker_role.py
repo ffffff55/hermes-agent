@@ -103,3 +103,128 @@ def _is_marker(entry: dict) -> bool:
     from tui_gateway.server import _is_model_switch_marker
 
     return _is_model_switch_marker(entry)
+
+
+class TestAgentlessModelSwitchPersists:
+    """#149870: a composer pick is ``model --provider X``. That shape does not
+    pre-build an agent, so the durable commit used to be skipped entirely.
+    Resume, the desktop timeline, and the model's ``[System: ...]`` injection
+    all read the row this switch has to write."""
+
+    @staticmethod
+    def _switch(monkeypatch, db, session: dict, raw: str, **kwargs):
+        from types import SimpleNamespace
+
+        from tui_gateway import server
+
+        result = SimpleNamespace(
+            success=True, new_model="gemini-3.8-flash-high", target_provider="easycliproxyapi_ws",
+            base_url="http://127.0.0.1:8318/v1", api_key="sk-test", api_mode="chat_completions",
+            warning_message="", error_message="", model_info=None, runtime_capabilities=None)
+        monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_kw: result)
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_config_model_target", lambda: ("deepseek/deepseek-v4.1-flash", "cmdcode2api"))
+        # The picker's provider is a configured custom entry on a real profile. This home has
+        # no providers.yaml; treat the stored name as routable so resume assembly is what we assert.
+        monkeypatch.setattr(server, "_is_routable_provider", lambda _provider: True)
+        return server._apply_model_switch("sid", session, raw, confirm_expensive_model=True, **kwargs)
+
+    def test_agentless_provider_pick_writes_marker_and_route(self, tmp_path, monkeypatch) -> None:
+        import json
+
+        from hermes_state import SessionDB
+        from tui_gateway import server
+
+        key = "local-" + ("a" * 64)
+        db = SessionDB(tmp_path / "state.db")
+        try:
+            db.create_session(
+                key, source="local", model="deepseek/deepseek-v4.1-flash",
+                model_config={
+                    "model": "deepseek/deepseek-v4.1-flash",
+                    "provider": "cmdcode2api",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "api_mode": "chat_completions",
+                    "follow_profile_config": True,
+                    "gateway_runtime": {
+                        "provider": "cmdcode2api",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "api_mode": "chat_completions",
+                    },
+                })
+            session = {
+                "agent": None,
+                "session_key": key,
+                "follow_profile_config": True,
+                "history": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
+            }
+
+            out = self._switch(
+                monkeypatch, db, session, "gemini-3.8-flash-high --provider easycliproxyapi_ws",
+                persist_override=False)
+
+            assert out["value"] == "gemini-3.8-flash-high"
+            assert out["scope"] == "session"
+            assert session.get("agent") is None
+            assert session["model_override"]["model"] == "gemini-3.8-flash-high"
+            assert session["model_override"]["provider"] == "easycliproxyapi_ws"
+            marker = session["history"][-1]
+            assert marker["role"] == "user"
+            assert marker["display_kind"] == "model_switch"
+            assert marker["content"].startswith("[System: The active model for this chat has changed to ")
+            assert "gemini-3.8-flash-high" in marker["content"]
+            assert "via provider easycliproxyapi_ws" in marker["content"]
+            assert [h["content"] for h in session["history"][:-1]] == ["hello", "hi"]
+
+            stored = db.get_session(key)
+            assert stored["model"] == "gemini-3.8-flash-high"
+            config = json.loads(stored["model_config"])
+            assert config["provider"] == "easycliproxyapi_ws"
+            assert config["base_url"] == "http://127.0.0.1:8318/v1"
+            assert config["api_mode"] == "chat_completions"
+            assert config["model"] == "gemini-3.8-flash-high"
+            # The resume reader prefers nested gateway_runtime over the top-level keys.
+            assert config["gateway_runtime"]["provider"] == "easycliproxyapi_ws"
+            assert config["gateway_runtime"]["base_url"] == "http://127.0.0.1:8318/v1"
+            assert "sk-test" not in stored["model_config"]
+            assert config["composer_override_profile"] == {
+                "model": "deepseek/deepseek-v4.1-flash", "provider": "cmdcode2api"}
+            assert config["follow_profile_config"] is True
+            restored = server._stored_session_runtime_overrides(stored)
+            assert restored["model_override"]["model"] == "gemini-3.8-flash-high"
+            assert restored["model_override"]["provider"] == "easycliproxyapi_ws"
+            assert restored["model_override"]["base_url"] == "http://127.0.0.1:8318/v1"
+            assert restored["provider_override"] == "easycliproxyapi_ws"
+
+            rows = [m for m in db.get_messages(key) if m.get("display_kind") == "model_switch"]
+            assert len(rows) == 1
+            assert rows[0]["role"] == "user"
+            assert rows[0]["content"] == marker["content"]
+        finally:
+            db.close()
+
+    def test_agentless_once_does_not_persist(self, tmp_path, monkeypatch) -> None:
+        import json
+
+        import pytest
+
+        from hermes_state import SessionDB
+
+        key = "local-" + ("b" * 64)
+        db = SessionDB(tmp_path / "state.db")
+        try:
+            db.create_session(key, source="local", model="deepseek/deepseek-v4.1-flash", model_config={
+                "provider": "cmdcode2api",
+                "gateway_runtime": {"provider": "cmdcode2api", "base_url": "http://127.0.0.1:11434/v1"},
+            })
+            session = {"agent": None, "session_key": key, "history": []}
+            with pytest.raises(ValueError, match="--once"):
+                self._switch(monkeypatch, db, session, "gemini-3.8-flash-high --provider easycliproxyapi_ws --once")
+            stored = db.get_session(key)
+            assert stored["model"] == "deepseek/deepseek-v4.1-flash"
+            assert json.loads(stored["model_config"])["gateway_runtime"]["provider"] == "cmdcode2api"
+            assert db.get_messages(key) == []
+            assert session["history"] == []
+            assert "model_override" not in session
+        finally:
+            db.close()
