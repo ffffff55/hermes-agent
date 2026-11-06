@@ -991,3 +991,63 @@ class TestPromptCacheKeyCapability:
             request_overrides={"prompt_cache_key": "   "},
         )
         assert "prompt_cache_key" not in kwargs
+
+
+class TestToolSchemaRefAlias:
+    """Gemini-compatible chat_completions routes 400 when a tool result's JSON
+    contains a ``$ref`` key. Regression for #148340."""
+
+    def test_tool_result_refs_are_aliased_on_the_wire(self, transport):
+        from providers.base import ProviderProfile
+
+        content = json.dumps({
+            "parameters": {
+                "properties": {"source": {"$ref": "#/$defs/TerminalOpenSource"}},
+                "$defs": {"TerminalOpenSource": {"type": "string"}},
+            },
+        })
+        tool = {
+            "role": "tool", "tool_call_id": "call_1", "name": "tool_describe",
+            "content": content,
+        }
+        user = {"role": "user", "content": 'keep "$ref": in this user text'}
+        assistant = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                    "name": "mcp__oxide__terminals_open",
+                    "arguments": '{"source": {"$ref": "#/$defs/X"}}',
+                },
+            }],
+        }
+        msgs = [user, assistant, tool]
+        profile = ProviderProfile(name="axonhub", base_url="https://gateway.example/v1")
+        kwargs = transport.build_kwargs(
+            model="gemini-3.8-flash", messages=msgs, tools=None,
+            provider_profile=profile, base_url=profile.base_url,
+            provider_name="custom",
+        )
+        wired_tool = kwargs["messages"][2]
+        parsed = json.loads(wired_tool["content"])
+        source = parsed["parameters"]["properties"]["source"]
+
+        assert '"$ref":' not in wired_tool["content"]
+        assert source["_ref"] == "#/$defs/TerminalOpenSource"
+        assert "name" not in wired_tool
+        assert tool["content"] == content
+        assert kwargs["messages"][0] is user
+        assert kwargs["messages"][1] is assistant
+        assert '"$ref":' in assistant["tool_calls"][0]["function"]["arguments"]
+
+    def test_clean_tool_results_and_quoted_mentions_stay_put(self, transport):
+        quoted = json.dumps({"note": 'Literal "$ref": in prose is not a key'})
+        msgs = [
+            {"role": "tool", "tool_call_id": "call_ok", "content": '{"ok": true}'},
+            {"role": "tool", "tool_call_id": "call_note", "content": quoted},
+        ]
+        # Escaped quotes are not an object key, so the list is sent unchanged.
+        assert '"$ref":' not in quoted
+        assert transport.convert_messages(msgs) is msgs

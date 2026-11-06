@@ -512,6 +512,67 @@ class TestBatchedDescribe:
         ))
         assert "mq_linear_create_issue" in result["tools"]
 
+    def test_described_mcp_refs_are_aliased_and_callable_schema_keeps_ref(self):
+        """Describe output must not carry a naked ``$ref`` key (Gemini HTTP 400).
+
+        Regression for #148340. The proxy parses the tool result as a
+        functionResponse and treats ``$ref`` as a parts pointer. The rename is
+        only in the serialized describe payload: the normalized MCP schema the
+        real call uses stays a valid ``$ref``.
+        """
+        from tools.mcp_tool_schema import _normalize_mcp_input_schema
+        from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
+
+        schema = _normalize_mcp_input_schema({
+            "type": "object",
+            "definitions": {
+                "TerminalOpenSource": {"type": "string"},
+                "Window": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"$ref": "#/definitions/TerminalOpenSource"},
+                    },
+                },
+            },
+            "properties": {
+                "source": {"$ref": "#/definitions/TerminalOpenSource"},
+                "window": {"$ref": "#/definitions/Window"},
+            },
+            "required": ["source"],
+        })
+        tool_def = _register(
+            "mcp__refsafe__terminals_open", "mcp-refsafe", "Open a terminal",
+        )
+        tool_def["function"]["parameters"] = schema
+        plain = _register(
+            "mcp__refsafe__ping", "mcp-refsafe",
+            'Literal "$ref": in text is not a schema key',
+        )
+
+        raw = dispatch_tool_describe(
+            {"names": ["mcp__refsafe__terminals_open", "mcp__refsafe__ping"]},
+            current_tool_defs=[tool_def, plain],
+            config=ToolSearchConfig.from_raw({}),
+        )
+        tools = json.loads(raw)["tools"]
+        described = tools["mcp__refsafe__terminals_open"]["parameters"]
+
+        assert '"$ref":' not in raw
+        assert described["properties"]["source"]["_ref"] == "#/$defs/TerminalOpenSource"
+        assert described["properties"]["window"]["_ref"] == "#/$defs/Window"
+        assert described["$defs"]["Window"]["properties"]["source"]["_ref"] == (
+            "#/$defs/TerminalOpenSource"
+        )
+        assert described["$defs"]["TerminalOpenSource"]["type"] == "string"
+        ping = tools["mcp__refsafe__ping"]
+        assert ping["parameters"] == plain["function"]["parameters"]
+        assert ping["description"] == plain["function"]["description"]
+        # Live call schema is still JSON Schema, not the describe alias.
+        assert schema["properties"]["source"]["$ref"] == "#/$defs/TerminalOpenSource"
+        assert schema["$defs"]["Window"]["properties"]["source"]["$ref"] == (
+            "#/$defs/TerminalOpenSource"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Config + bridge schema

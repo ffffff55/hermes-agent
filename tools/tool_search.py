@@ -539,7 +539,10 @@ def dispatch_tool_describe(args: dict[str, Any], *, current_tool_defs: list[dict
         result["errors"] = errors
     if hosted_failure:
         result["connectors"] = connectors_unavailable(hosted_failure, verb="described", names=undescribed)
-    return json.dumps(result, ensure_ascii=False)
+    # Gemini-compatible proxies parse this tool result as a functionResponse
+    # and 400 on a ``$ref`` key. Rename it only in the model-facing payload;
+    # the registered schema stays a real ``$ref`` for the MCP call.
+    return json.dumps(result, ensure_ascii=False).replace('"$ref":', '"_ref":')
 
 
 def scoped_deferrable_names(tool_defs: list[dict[str, Any]]) -> frozenset[str]:

@@ -525,6 +525,36 @@ def _sanitize_message(
     return out_msg if strip_keys or remapped or copied_tool_calls is not None else None
 
 
+# Compact JSON object key. ``json.dumps`` emits this; a quoted mention is escaped
+# (``\"$ref\":``) and does not match.
+_SCHEMA_REF_KEY = '"$ref":'
+_SCHEMA_REF_ALIAS = '"_ref":'
+
+
+def _alias_tool_schema_refs(messages: list) -> list:
+    """Rename JSON-Schema ``$ref`` keys in tool results on the wire copy.
+
+    OpenAI-compatible Gemini proxies parse a tool result into
+    ``functionResponse.response`` and resolve ``$ref`` as a multimodal part
+    pointer (HTTP 400). Native Gemini demotes that payload to opaque text;
+    this route only has the string, so the key is renamed. Stored messages
+    are not mutated. A list with nothing to rename is returned by identity.
+    """
+    aliased = None
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or _SCHEMA_REF_KEY not in content:
+            continue
+        if aliased is None:
+            aliased = list(messages)
+        copied = dict(msg)
+        copied["content"] = content.replace(_SCHEMA_REF_KEY, _SCHEMA_REF_ALIAS)
+        aliased[index] = copied
+    return messages if aliased is None else aliased
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'."""
 
@@ -539,7 +569,10 @@ class ChatCompletionsTransport(ProviderTransport):
     def convert_messages(self, messages: list[dict[str, Any]], **kwargs) -> list[dict[str, Any]]:
         """Strip internal fields that strict chat-completions providers reject (HTTP 400/422).
 
-        Returns the input list unchanged when nothing needs sanitizing.
+        Tool results that contain a JSON-Schema ``$ref`` key are rewritten to
+        ``_ref`` on the wire copy so Gemini-compatible proxies do not read the
+        key as a functionResponse part pointer. Returns the input list
+        unchanged when nothing needs sanitizing.
         """
         profile = kwargs.get("provider_profile")
         provider = getattr(profile, "name", None) or kwargs.get("provider")
@@ -555,8 +588,9 @@ class ChatCompletionsTransport(ProviderTransport):
                                                  mistral_tool_ids=mistral_ids))
                            for m in messages]
         if all(s is None for _, s in sanitized_pairs):
-            return messages
-        return [m if s is None else s for m, s in sanitized_pairs]
+            return _alias_tool_schema_refs(messages)
+        sanitized = [m if s is None else s for m, s in sanitized_pairs]
+        return _alias_tool_schema_refs(sanitized)
 
     def convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tools are already in OpenAI format — identity."""
