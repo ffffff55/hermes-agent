@@ -40,9 +40,9 @@ def _snapshot_primary_runtime(agent):
     }
     if agent.api_mode == "anthropic_messages":
         agent._primary_runtime.update({
-            "anthropic_api_key": agent._anthropic_api_key,
-            "anthropic_base_url": agent._anthropic_base_url,
-            "is_anthropic_oauth": agent._is_anthropic_oauth,
+            "anthropic_api_key": getattr(agent, "_anthropic_api_key", ""),
+            "anthropic_base_url": getattr(agent, "_anthropic_base_url", None),
+            "is_anthropic_oauth": getattr(agent, "_is_anthropic_oauth", False),
         })
 
 

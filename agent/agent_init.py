@@ -762,12 +762,7 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
         if is_actual_route(effective_provider):
             agent.provider = normalize_provider(effective_provider)
         return _client_kwargs_from_routed(_routed_client, _provider_timeout)
-    # No credentials: try the fallback chain BEFORE failing (an exhausted single-entry pool
-    # must not die with a misleading "No LLM provider configured"); only explicitly named
-    # providers keep the missing-key diagnostic.
-    # An exhausted single-entry pool (typically ``openrouter`` under free-tier daily quotas) must still
-    # reach the chain instead of dying at init with a misleading "No LLM provider configured" error. See
-    # #17929.
+    # Try fallbacks before the missing-key error; named providers keep theirs (#17929).
     _explicit = (agent.provider or "").strip().lower()
     _refused_entries = []
     for _fb in _fallback_entries(fallback_model):
@@ -896,6 +891,11 @@ def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_time
         if client_kwargs is None:  # init-time fallback bound the MoA facade
             if not agent.quiet_mode:
                 print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
+            return
+        # Fallback can flip the wire; only the Anthropic builder sets snapshot fields.
+        if agent.api_mode == "anthropic_messages":
+            _init_anthropic_client(agent, client_kwargs["api_key"],
+                                   client_kwargs["base_url"], _provider_timeout)
             return
     from hermes_cli.providers import is_actual_route
     if is_actual_route(agent.provider, client_kwargs.get("base_url", "")):
