@@ -454,3 +454,18 @@ def test_normalize_provider_ids_leaves_single_and_mixed_batches_unchanged():
         before = [c.copy() for c in calls]
         normalize_provider_tool_call_ids(calls)
         assert calls == before
+
+
+def test_successful_provider_id_normalization_logs_at_debug(caplog):
+    """A routine rewrite is not an anomaly, so it stays out of errors.log (#150306)."""
+    import logging
+
+    calls = [
+        {"id": "chatcmpl-tool-a", "call_id": "chatcmpl-tool-a"},
+        {"id": "chatcmpl-tool-b", "call_id": "chatcmpl-tool-b"},
+    ]
+    with caplog.at_level(logging.DEBUG, logger="agent.message_sanitization"):
+        normalize_provider_tool_call_ids(calls)
+    hits = [r for r in caplog.records if "provider-minted" in r.getMessage()]
+    assert [r.levelno for r in hits] == [logging.DEBUG]
+    assert calls[0]["id"].startswith("call_")
