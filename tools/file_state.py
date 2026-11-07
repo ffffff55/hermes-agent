@@ -17,10 +17,54 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-# (mtime, read_ts, partial). partial=True when read_file returned a windowed
-# view (offset > 1 or limit < total_lines) — a later write should still warn
-# so the model re-reads in full.
-ReadStamp = tuple[float, float, bool]
+# (mtime, read_ts, partial, partial_reason). partial=True when the read is
+# not whole-file knowledge. partial_reason names which condition (below) so a
+# later write refusal does not call every partial read offset/limit pagination
+# (#150889). A bare partial=True keeps the historical pagination reason.
+ReadStamp = tuple[float, float, bool, str | None]
+
+# Only pagination's remedy is "read the remaining pages". The others name the
+# condition that actually blocked a full view.
+PARTIAL_PAGINATION = "pagination"
+PARTIAL_UNSTABLE = "unstable"
+PARTIAL_REDACTED = "redacted"
+PARTIAL_TRUNCATED_LINES = "truncated_lines"
+PARTIAL_CHAR_BUDGET = "char_budget"
+PARTIAL_REPEAT = "repeat"
+
+_PARTIAL_REFUSAL = {
+    PARTIAL_PAGINATION: (
+        "{path} was last read with offset/limit pagination "
+        "(partial view). Read the remaining pages, or use patch, "
+        "before overwriting it."
+    ),
+    PARTIAL_UNSTABLE: (
+        "{path} was last read from an unstable snapshot "
+        "(file metadata changed during the read), so that read is "
+        "not a full view. Re-read the file in full, or use patch, "
+        "before overwriting it."
+    ),
+    PARTIAL_REDACTED: (
+        "{path} was last read with redacted content, so that read "
+        "is not a full view. Use patch for a targeted edit before "
+        "overwriting it."
+    ),
+    PARTIAL_TRUNCATED_LINES: (
+        "{path} was last read with lines truncated at the length "
+        "limit, so that read is not a full view. Use patch for a "
+        "targeted edit before overwriting it."
+    ),
+    PARTIAL_CHAR_BUDGET: (
+        "{path} was last read truncated at the character budget, "
+        "so that read is not a full view. Continue from the read's "
+        "next_offset until the file is covered, or use patch, "
+        "before overwriting it."
+    ),
+    PARTIAL_REPEAT: (
+        "{path} was read repeatedly without recording a full view. "
+        "Re-read the file in full, or use patch, before overwriting it."
+    ),
+}
 
 # Bounded so long sessions don't accumulate unbounded state.
 _MAX_PATHS_PER_AGENT = 4096
@@ -94,13 +138,19 @@ class FileStateRegistry:
                     self._path_lock_users.pop(resolved, None)
                     self._path_locks.pop(resolved, None)
 
-    def _stamp(self, task_id: str, resolved: str, mtime: float, now: float, partial: bool) -> None:
-        """Caller holds ``_state_lock``."""
+    def _stamp(self, task_id: str, resolved: str, mtime: float, now: float, partial: bool,
+               partial_reason: str | None = None) -> None:
+        """Caller holds ``_state_lock``. A partial stamp with no reason keeps the
+        historical pagination wording; callers that overload ``partial`` pass why."""
+        reason = None
+        if partial:
+            reason = partial_reason or PARTIAL_PAGINATION
         agent_reads = self._reads[task_id]
-        agent_reads[resolved] = (float(mtime), now, bool(partial))
+        agent_reads[resolved] = (float(mtime), now, bool(partial), reason)
         _evict_oldest(agent_reads, _MAX_PATHS_PER_AGENT)
 
     def record_read(self, task_id: str, resolved: str, *, partial: bool = False,
+                    partial_reason: str | None = None,
                     mtime: Optional[float] = None) -> None:
         if _disabled():
             return
@@ -108,7 +158,7 @@ class FileStateRegistry:
         if mtime is None:
             return
         with self._state_lock:
-            self._stamp(task_id, resolved, mtime, time.time(), partial)
+            self._stamp(task_id, resolved, mtime, time.time(), partial, partial_reason)
 
     def note_write(self, task_id: str, resolved: str, *, mtime: Optional[float] = None) -> None:
         """Record a successful write: global last-writer AND this agent's own
@@ -157,17 +207,14 @@ class FileStateRegistry:
                         "Re-read the file before writing.")
 
         if stamp is not None:
-            read_mtime, _read_ts, partial = stamp
+            read_mtime, _read_ts, partial, partial_reason = stamp
             if current_mtime != read_mtime:
                 return (
                     f"{resolved} was modified since you last read it "
                     "on disk (external edit or unrecorded writer). "
                     "Re-read the file before writing.")
             if partial:
-                return (
-                    f"{resolved} was last read with offset/limit pagination "
-                    "(partial view). Read the remaining pages, or use patch, "
-                    "before overwriting it.")
+                return _partial_refusal(resolved, partial_reason)
             return None
 
         return (
@@ -225,8 +272,54 @@ def get_registry() -> FileStateRegistry:
 
 
 # Convenience wrappers (short names used at call sites).
-def record_read(task_id: str, resolved_or_path: str | Path, *, partial: bool = False) -> None:
-    _registry.record_read(task_id, str(resolved_or_path), partial=partial)
+def incomplete_read_reason(
+    *,
+    stable: bool,
+    over_repeat: bool,
+    window_partial: bool,
+    coverage_complete: bool,
+    redacted: bool,
+    truncated_lines: bool,
+    char_budget: bool,
+) -> str:
+    """Why a read that is not whole-file knowledge must not authorize an overwrite.
+
+    An unstable snapshot wins: the bytes themselves are untrusted. Clamped or
+    redacted content cannot be recovered by paging, so those names beat a
+    window or character-budget gap. ``repeat`` is only the residue of an
+    otherwise complete read discarded by the repeat ceiling.
+    """
+    if not stable:
+        return PARTIAL_UNSTABLE
+    if truncated_lines:
+        return PARTIAL_TRUNCATED_LINES
+    if redacted:
+        return PARTIAL_REDACTED
+    if char_budget and not coverage_complete:
+        return PARTIAL_CHAR_BUDGET
+    if window_partial and not coverage_complete:
+        return PARTIAL_PAGINATION
+    if over_repeat:
+        return PARTIAL_REPEAT
+    return PARTIAL_UNSTABLE
+
+
+def _partial_refusal(resolved: str, reason: str | None) -> str:
+    template = _PARTIAL_REFUSAL.get(reason or "")
+    if template is None:
+        label = f" ({reason})" if reason else ""
+        return (
+            f"{resolved} was last read as a partial view{label}, so that "
+            "read is not a full view. Re-read the file in full, or use "
+            "patch, before overwriting it."
+        )
+    return template.format(path=resolved)
+
+
+def record_read(task_id: str, resolved_or_path: str | Path, *, partial: bool = False,
+                partial_reason: str | None = None) -> None:
+    _registry.record_read(
+        task_id, str(resolved_or_path), partial=partial, partial_reason=partial_reason)
 
 
 def note_write(task_id: str, resolved_or_path: str | Path) -> None:

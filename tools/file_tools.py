@@ -533,7 +533,8 @@ def _dedup_stub_or_block(task_data: dict, dedup_key: tuple, path: str) -> str:
 
 def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_str: str,
                             offset: int, limit: int, dedup_key: tuple, *, partial: bool,
-                            redacted: bool = False, end_line: int | None = None,
+                            redacted: bool = False, truncated_lines: bool = False,
+                            char_budget: bool = False, end_line: int | None = None,
                             total_lines=None, version_before=None, snapshot=None) -> int:
     """Bookkeeping after a real (non-stub) read; returns the consecutive-read count.
 
@@ -550,6 +551,9 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
     version = (snapshot or _file_version(resolved_str)) if version_before is not None else None
     stable = version is not None and version[:-1] == version_before == _file_metadata(resolved_str)
     complete = False
+    coverage_complete = False
+    # A clamped line is not round-trippable either: the model never saw its tail.
+    seen_blocked = bool(redacted or truncated_lines)
     with _read_tracker_lock:
         task_data["dedup_hits"].pop(dedup_key, None)
         task_data["dedup_generation_reads"].add(dedup_key)
@@ -569,9 +573,12 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
             if not complete:
                 complete = not partial
                 if partial and end_line is not None:
-                    complete, redacted = _note_read_coverage(
-                        task_data, resolved_str, version, offset, end_line, total_lines, redacted)
-                complete = complete and not redacted
+                    complete, seen_blocked = _note_read_coverage(
+                        task_data, resolved_str, version, offset, end_line,
+                        total_lines, seen_blocked)
+                # Line coverage, before redaction/clamping clears the baseline.
+                coverage_complete = complete
+                complete = complete and not seen_blocked
             if complete:
                 baselines[resolved_str] = version
                 task_data.setdefault("blind_patches", {}).pop(resolved_str, None)
@@ -583,7 +590,21 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
         _cap_read_tracker_data(task_data)
 
     try:
-        file_state.record_read(task_id, resolved_str, partial=not complete)
+        reason = None
+        if not complete:
+            # The stamp's reason is what check_stale prints. Completeness
+            # (partial=not complete) is unchanged.
+            reason = file_state.incomplete_read_reason(
+                stable=stable,
+                over_repeat=count >= 4,
+                window_partial=partial,
+                coverage_complete=coverage_complete,
+                redacted=bool(seen_blocked),
+                truncated_lines=bool(truncated_lines),
+                char_budget=bool(char_budget),
+            )
+        file_state.record_read(
+            task_id, resolved_str, partial=not complete, partial_reason=reason)
     except Exception:
         logger.debug("file_state.record_read failed", exc_info=True)
 
@@ -733,12 +754,15 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
             end_line = offset + limit - 1
             if isinstance(total_lines, int) and total_lines > 0:
                 end_line = min(end_line, total_lines)
-        count = _record_successful_read(task_data, task_id, path, resolved_str, offset, limit,
-                                        dedup_key, partial=(offset > 1) or bool(result_dict.get("truncated")),
-                                        redacted=redacted or bool(result_dict.get("truncated_lines")),
-                                        end_line=end_line, total_lines=total_lines,
-                                        version_before=version_before,
-                                        snapshot=getattr(result, "_snapshot", None))
+        count = _record_successful_read(
+            task_data, task_id, path, resolved_str, offset, limit, dedup_key,
+            partial=(offset > 1) or bool(result_dict.get("truncated")),
+            redacted=redacted,
+            truncated_lines=bool(result_dict.get("truncated_lines")),
+            char_budget=result_dict.get("truncated_by") == "bytes",
+            end_line=end_line, total_lines=total_lines,
+            version_before=version_before,
+            snapshot=getattr(result, "_snapshot", None))
         if count >= 4:
             return tool_error(
                 f"BLOCKED: You have read this exact file region {count} times in a row. "
