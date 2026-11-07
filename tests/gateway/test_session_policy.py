@@ -169,6 +169,49 @@ def test_provider_override_drops_the_previous_providers_route(tmp_path):
     assert unrecorded.config()['model'] == {'default': 'm', 'provider': 'xiaomi'}
 
 
+def test_provider_only_launch_uses_the_named_entry_default_model(tmp_path):
+    """`--provider NAME` without `--model` runs that entry's default_model, not the profile model (#150748).
+
+    `hermes --provider myllama` (CLI or TUI) must not keep sending `model.default` to the previous
+    provider. An explicit `--model` still wins, and an entry with no default_model keeps the profile model.
+    """
+    from gateway.run import _resolve_gateway_model
+    from gateway.session_policy import build_policy
+    from hermes_cli.runtime_provider import frozen_runtime_config, resolve_runtime_provider
+    cfg = {
+        'model': {'default': 'openai/gpt-6-luna', 'provider': 'custom:router',
+                  'base_url': 'http://router.local/api/v1', 'context_length': 269000},
+        'providers': {
+            'router': {'base_url': 'http://router.local/api/v1', 'default_model': 'openai/gpt-6-luna'},
+            'myllama': {'base_url': 'http://127.0.0.1:8080/v1', 'default_model': 'ggml-org/gemma-4-E4B-it'},
+        },
+    }
+    policy = build_policy(dict(cwd=str(tmp_path), provider='myllama'), cfg)
+    model = policy.config()['model']
+    assert model['provider'] == 'myllama'
+    assert model['default'] == 'ggml-org/gemma-4-E4B-it'
+    assert 'base_url' not in model and 'context_length' not in model
+    assert _resolve_gateway_model(policy.config()) == 'ggml-org/gemma-4-E4B-it'
+    with frozen_runtime_config(policy.config()):
+        runtime = resolve_runtime_provider(requested='myllama', target_model=model['default'])
+    assert runtime['base_url'].rstrip('/') == 'http://127.0.0.1:8080/v1'
+    spelled = build_policy(dict(cwd=str(tmp_path), provider='custom:myllama'), cfg)
+    assert spelled.config()['model']['default'] == 'ggml-org/gemma-4-E4B-it'
+    explicit = build_policy(dict(cwd=str(tmp_path), provider='myllama', model='other-id'), cfg)
+    assert explicit.model == 'other-id'
+    assert explicit.config()['model']['default'] == 'openai/gpt-6-luna'
+    bare = build_policy(dict(cwd=str(tmp_path), provider='myllama'), {
+        'model': {'default': 'openai/gpt-6-luna', 'provider': 'custom:router'},
+        'providers': {'myllama': {'base_url': 'http://127.0.0.1:8080/v1'}},
+    })
+    assert bare.config()['model'] == {'default': 'openai/gpt-6-luna', 'provider': 'myllama'}
+    same = build_policy(dict(cwd=str(tmp_path), provider='myllama'), {
+        'model': {'default': 'keep-me', 'provider': 'custom:myllama'},
+        'providers': {'myllama': {'base_url': 'http://127.0.0.1:8080/v1', 'default_model': 'other'}},
+    })
+    assert same.config()['model']['default'] == 'keep-me'
+
+
 def test_provider_change_drops_the_old_providers_context_window(tmp_path):
     """The profile's context_length was sized for its own model: a pick to another provider must
     not pin that window on the new model, while a same-route alias pick keeps it."""

@@ -95,3 +95,13 @@ class TestResolveGatewayModel:
     def test_string_model_config(self):
         from gateway.run import _resolve_gateway_model
         assert _resolve_gateway_model({"model": "my-model"}) == "my-model"
+
+    def test_named_provider_default_model_when_model_default_missing(self):
+        """A profile that names a custom provider but no model.default uses that entry's default_model (#150748)."""
+        from gateway.run import _resolve_gateway_model
+        cfg = {
+            "model": {"provider": "custom:myllama"},
+            "providers": {"myllama": {"base_url": "http://127.0.0.1:8080/v1",
+                                      "default_model": "ggml-org/gemma-4-E4B-it"}},
+        }
+        assert _resolve_gateway_model(cfg) == "ggml-org/gemma-4-E4B-it"

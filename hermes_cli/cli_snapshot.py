@@ -148,7 +148,7 @@ def _restore_gateway_snapshot(cli, store, snap_id):
 
 
 def _rejoin_cli(cli, store):
-    from hermes_cli.cli_init_mixin import _ROUTE_FLAGS, _gateway_launch, lease_handed_over
+    from hermes_cli.cli_init_mixin import _fresh_session_launch, lease_handed_over
     from hermes_cli.gateway_tools import bind_session
     # Same-id restores still replace the connection and invalidate the cached proxies.
     cli.agent = None
@@ -162,7 +162,7 @@ def _rejoin_cli(cli, store):
             if str(exc) != "not_found":
                 raise
             # The snapshot predates this session: only the owner may mint its replacement.
-            launch = {key: value for key, value in _gateway_launch(cli).items() if key not in _ROUTE_FLAGS}
+            launch = _fresh_session_launch(cli)
             store.create(launch, record_cwd=False)
             snapshot = store.current
         cli.session_id = snapshot["stored_session_id"]

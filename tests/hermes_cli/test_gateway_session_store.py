@@ -733,6 +733,45 @@ def test_unchanged_model_flag_on_resume_ignores_the_configured_provider(store, m
     assert created["model"] == "my-model" and "provider" not in created, created
 
 
+def test_provider_only_flag_reaches_the_gateway_and_new_keeps_it(store, monkeypatch):
+    """Regression for #150748: `--provider NAME` without `-m` is session.create policy, and `/new` keeps it.
+
+    The gateway adopts that entry's default_model. An explicit `-m` is still only for the session that
+    was launched with it, so `/new` drops the model and keeps the typed provider.
+    """
+    import cli as cli_module
+    from hermes_cli.cli_init_mixin import CLIInitMixin, _gateway_launch
+    monkeypatch.delenv("HERMES_SESSION_SOURCE", raising=False)
+    monkeypatch.setitem(cli_module.CLI_CONFIG, "model",
+                        {"default": "openai/gpt-6-luna", "provider": "custom:router"})
+    db, client = store
+
+    def opened(model, provider):
+        host = types.SimpleNamespace(session_id="local-old", _resumed=False, enabled_toolsets=None,
+                                     _explicit_toolsets=False,
+                                     _session_db=GatewaySessionStore(db.connection))
+        CLIInitMixin._init_model_and_provider(host, model, provider, None, None)
+        return host
+
+    host = opened(None, "myllama")
+    assert _gateway_launch(host)["provider"] == "myllama"
+    assert _gateway_launch(host)["model"] is None
+    CLIInitMixin._ensure_gateway_session(host)
+    created = [p for m, p in client.calls if m == "session.create"][-1]
+    assert created.get("provider") == "myllama" and "model" not in created
+    CLIInitMixin._new_session_id(host, None)
+    fresh = [p for m, p in client.calls if m == "session.create"][-1]
+    assert fresh.get("provider") == "myllama" and "model" not in fresh
+
+    both = opened("explicit-id", "myllama")
+    assert _gateway_launch(both)["model"] == "explicit-id"
+    assert _gateway_launch(both)["provider"] == "myllama"
+    both._gateway_session_open = True
+    CLIInitMixin._new_session_id(both, None)
+    kept = [p for m, p in client.calls if m == "session.create"][-1]
+    assert kept.get("provider") == "myllama" and "model" not in kept
+
+
 def test_new_session_keeps_the_runs_launch_policy(store, monkeypatch):
     """CLI-3: `/new` keeps `--max-turns`, `--checkpoints`, `--run-budget`, `-v` and `-s` (main kept one
     AIAgent across /new); only the explicit model route is left to the profile default."""

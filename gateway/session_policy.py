@@ -582,6 +582,44 @@ def _with_entry_pick(params, config):
     return {**params, 'provider': identity}
 
 
+def named_provider_default_model(provider: str, config: dict) -> str:
+    """``providers.<name>.default_model`` (legacy ``custom_providers`` ``model``) for *provider*, or ``""``."""
+    name = str(provider or '').strip()
+    if not name or name.lower() == 'auto':
+        return ''
+    from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+    entry = _get_named_custom_provider(name, config=config, resolve_credentials=False) or {}
+    return str(entry.get('model') or '').strip()
+
+
+def profile_model_name(config: dict | None) -> str:
+    """``model.default`` (or the legacy ``model.model``), else that provider's ``default_model``, else the
+    welcome trial. An empty profile with neither stays empty when no trial is claimed."""
+    from hermes_cli.anon_auth import trial_model
+    block = (config or {}).get('model', {})
+    chosen = (block.get('default') or block.get('model')) if isinstance(block, dict) else block
+    named = chosen.strip() if isinstance(chosen, str) else ''
+    if named:
+        return named
+    provider = str(block.get('provider') or '').strip() if isinstance(block, dict) else ''
+    return named_provider_default_model(provider, config or {}) or trial_model()
+
+
+def _adopt_provider_only_model(params, config, *, keeps_profile_route: bool) -> None:
+    """``--provider NAME`` without ``--model`` runs that entry's ``default_model``, not the profile's.
+
+    The profile model belongs to the provider being replaced; sending it to the new endpoint is the
+    route the user did not ask for (#150748). An explicit ``--model`` still wins. An entry with no
+    ``default_model`` keeps the profile model, matching the classic CLI. A pick of the profile's own
+    route leaves ``model.default`` alone.
+    """
+    if keeps_profile_route or 'model' in params or 'provider' not in params:
+        return
+    default = named_provider_default_model(params.get('provider'), config)
+    if default:
+        config.setdefault('model', {})['default'] = default
+
+
 def _apply_launch_overrides(params, config):
     """Validate the explicit model/agent launch overrides and fold them into *config*."""
     from urllib.parse import urlsplit
@@ -613,6 +651,7 @@ def _apply_launch_overrides(params, config):
                         or url.username or url.password or url.query or url.fragment):
                     _refuse('base_url', 'must be an http(s) URL without credentials, query or fragment')
             config.setdefault('model', {})[key] = value
+    _adopt_provider_only_model(params, config, keeps_profile_route=picks_profile_entry)
     bad_flag = next((flag for flag in ('ignore_rules', 'yolo', 'checkpoints', 'accept_hooks', 'pass_session_id',
                                       'follow_profile_config', 'cwd_explicit', 'verbose')
                      if flag in params and type(params[flag]) is not bool), None)

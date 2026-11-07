@@ -2873,14 +2873,11 @@ from gateway.session_worker_construct import checkpoint_agent_kwargs as _checkpo
 
 
 def _resolve_gateway_model(config: dict | None = None) -> str:
-    """The profile's model when nothing else names one: config.yaml (single source of truth), else the
-    claimed welcome trial's. Temporary AIAgents (e.g. /compress) otherwise use the hardcoded default,
-    which fails under openai-codex."""
-    from hermes_cli.anon_auth import trial_model
-    model_cfg = (config if config is not None else _load_gateway_config()).get("model", {})
-    if isinstance(model_cfg, dict):
-        model_cfg = model_cfg.get("default") or model_cfg.get("model")
-    return (model_cfg if isinstance(model_cfg, str) else "") or trial_model()
+    """The profile's model when nothing else names one: config.yaml, else that provider's
+    ``default_model``, else the claimed welcome trial. Temporary AIAgents (e.g. /compress)
+    otherwise use the hardcoded default, which fails under openai-codex."""
+    from gateway.session_policy import profile_model_name
+    return profile_model_name(config if config is not None else _load_gateway_config())
 
 
 def _channel_override_lookup_keys(

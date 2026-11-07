@@ -21,7 +21,8 @@ from utils import base_url_host_matches, base_url_hostname, is_truthy_value
 # Log-record parity with the origin module.
 logger = logging.getLogger("cli")
 
-# The launch flags that pick the model route: ``/new`` starts on the profile's default route.
+# The launch flags that pick the model route. ``/new`` drops an explicit ``-m`` (it belonged to the
+# previous session). A typed ``--provider`` stays — see ``_fresh_session_launch`` (#150748).
 _ROUTE_FLAGS = ("model", "provider", "api_key", "base_url")
 
 
@@ -42,8 +43,13 @@ def _gateway_launch(cli):
     """This run's explicit launch flags as gateway ``session.create`` policy (main handed them to AIAgent)."""
     explicit_model = getattr(cli, "_explicit_model_override", False)
     provider = getattr(cli, "_explicit_provider", None)
+    # A typed ``--provider`` is the route even without ``-m`` (#150748). A provider inferred from
+    # the model string still rides only with an explicit ``-m``, so the profile default stays the
+    # gateway's to resolve.
+    if not explicit_model:
+        provider = getattr(cli, "_typed_provider", None)
     return {"model": cli.model if explicit_model else None,
-            "provider": provider if explicit_model and provider not in {None, "", "auto"} else None,
+            "provider": provider if provider not in {None, "", "auto"} else None,
             "api_key": getattr(cli, "_explicit_api_key", None),
             "base_url": getattr(cli, "_explicit_base_url", None),
             # Only a typed -t; the gateway resolves the profile default and the coding posture (#138670).
@@ -56,6 +62,18 @@ def _gateway_launch(cli):
             "run_budget": getattr(cli, "_explicit_run_budget", None),
             "verbose": getattr(cli, "verbose", False) or None,
             "skills": _explicit_launch_skills(cli)}
+
+
+def _fresh_session_launch(cli):
+    """Launch flags for a session this process opens after the first (``/new``, a missing snapshot row).
+
+    An explicit ``-m`` belonged to the previous session. A typed ``--provider`` is the run's route
+    (#150748) and stays, so the gateway adopts that entry's ``default_model`` instead of the profile's.
+    """
+    drop = set(_ROUTE_FLAGS)
+    if getattr(cli, "_typed_provider", None) not in {None, "", "auto"}:
+        drop.discard("provider")
+    return {key: value for key, value in _gateway_launch(cli).items() if key not in drop}
 
 
 def _explicit_launch_skills(cli):
@@ -257,6 +275,9 @@ class CLIInitMixin:
         )
         # Only a provider the command line chose is gateway launch policy: the config default is the
         # gateway's to resolve, and a resume compares launch policy against the session's frozen route.
+        # ``_typed_provider`` is the ``--provider`` flag itself. ``_explicit_provider`` also covers a
+        # provider the model string implied, which is launch policy only together with ``-m``.
+        self._typed_provider = (provider or "").strip() or None
         self._explicit_provider = _moa_provider_override or provider or _startup_provider_override or None
         # `--provider <custom>` without `-m` uses that entry's default_model, else the global
         # default goes to the custom endpoint and the compressor gets the wrong context length.
@@ -477,8 +498,8 @@ class CLIInitMixin:
     def _new_session_id(self, now, *, branch_of=None, title=None):
         """The id main mints for /new (``new_session_id``) and /branch (``mint_session_id``). On a gateway
         store it is a session the gateway created: /new is a fresh ``session.create`` on the profile's
-        default model (an explicit -m was for the previous session only) with the run's other launch
-        flags, /branch the child of
+        default model (an explicit -m was for the previous session only; a typed --provider stays,
+        #150748) with the run's other launch flags, /branch the child of
         ``session.mutate branch``. Before this CLI opened its gateway session (or off the gateway) it is
         main's local mint, which ``_ensure_gateway_session`` replaces on first use, as at startup."""
         from hermes_cli.gateway_session_store import GatewaySessionStore
@@ -498,7 +519,8 @@ class CLIInitMixin:
                 enable_session_yolo(child)
             return child
         # The run's other launch flags hold for every session it opens, as main's one AIAgent did across /new.
-        launch = {key: value for key, value in _gateway_launch(self).items() if key not in _ROUTE_FLAGS}
+        # A typed --provider stays; an explicit -m does not (#150748).
+        launch = _fresh_session_launch(self)
         sid = store.create(launch, record_cwd=False)
         self.session_id = sid
         return sid
