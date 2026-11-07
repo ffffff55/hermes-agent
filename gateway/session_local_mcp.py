@@ -39,7 +39,13 @@ def fingerprint(servers):
 
 
 def validate_servers(servers):
-    from acp.schema import McpServerStdio, McpServerHttp, McpServerSse
+    try:
+        from acp.schema import McpServerStdio, McpServerHttp, McpServerSse
+    except ModuleNotFoundError as exc:
+        # The [acp] extra is optional. A bare import failure is JSON-RPC -32603
+        # and the ModuleNotFoundError only shows up in the gateway log.
+        raise RuntimeStoreError('acp_extra_missing', field='editor.mcp_servers',
+                                detail="the '[acp]' extra (agent-client-protocol) is not installed") from exc
     from pydantic import ValidationError
     kinds = {'stdio': McpServerStdio, 'http': McpServerHttp, 'sse': McpServerSse}
     if not isinstance(servers, list):
