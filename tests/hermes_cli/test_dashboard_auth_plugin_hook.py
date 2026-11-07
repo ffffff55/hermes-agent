@@ -190,6 +190,32 @@ def test_profile_manager_cannot_replace_launch_home_auth_provider():
     assert "basic" not in profile_manager._ownership_ledger
 
 
+def test_profile_scoped_dashboard_auth_ignore_logs_debug(caplog):
+    """Profile-scoped dashboard-auth ignores log at DEBUG, not WARNING (#150494)."""
+    import logging
+
+    manager, _launch_ctx = _real_ctx()
+    profile_scope = hermes_home_key(Path(manager.scope_key) / "profiles" / "bot")
+    profile_manager = PluginManager(scope_key=profile_scope)
+    profile_ctx = PluginContext(
+        PluginManifest(name="basic", version="0.0.1", kind="backend"),
+        manager=profile_manager,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_cli.plugins"):
+        registration = profile_ctx.register_dashboard_auth_provider(_Basic("profile"))
+
+    assert registration is None
+    assert get_provider("basic") is None
+    recs = [
+        r for r in caplog.records
+        if "tried to register dashboard-auth provider" in r.getMessage()
+    ]
+    assert len(recs) == 1
+    assert recs[0].levelno == logging.DEBUG
+    assert not any(r.levelno >= logging.WARNING for r in recs)
+
+
 def test_profile_directory_can_be_the_process_launch_home(monkeypatch, tmp_path):
     """A process launched directly into a profile owns dashboard auth."""
     launch_home = tmp_path / "profiles" / "bot"

@@ -550,7 +550,10 @@ class PluginContext(PluginCapabilityCtxMixin):
             return
         launch_scope = _facade().hermes_home_key(_facade().get_process_hermes_home())
         if self._manager.scope_key != launch_scope:
-            _facade().logger.warning(
+            # Deterministic ignore: only the launch scope owns dashboard auth, and a
+            # profile scan hits this on every home. DEBUG keeps it out of errors.log
+            # (#150494).
+            _facade().logger.debug(
                 "Plugin '%s' tried to register dashboard-auth provider %r "
                 "from profile scope %s; ignoring it because dashboard auth "
                 "is owned by launch scope %s.",
