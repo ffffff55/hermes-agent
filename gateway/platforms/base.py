@@ -4202,20 +4202,20 @@ class BasePlatformAdapter(ABC):
         self, event: MessageEvent, media_files: list, local_files: list, *,
         force_document_attachments: bool, human_delay: float, metadata: dict[str, Any],
         record_delivery: Callable) -> None:
-        """Deliver MEDIA-tag files and detected local files by type: images batched via
-        ``send_multiple_images`` unless ``[[as_document]]``; otherwise audio → send_voice (MEDIA
-        tags only, never bare local files), video → send_video, else send_document. Every failure is
-        reported. Each send feeds ``record_delivery`` so media-only turns report SUCCESS."""
+        """Deliver MEDIA-tag and local files by type and record every send."""
+        # A reconnect leaves this adapter with no client left ("Not connected").
+        live = self._final_delivery_adapter(event.source)
+        if live is not self:
+            return await live._deliver_media_attachments(
+                event, media_files, local_files, force_document_attachments=force_document_attachments,
+                human_delay=human_delay, metadata=metadata, record_delivery=record_delivery)
         from urllib.parse import quote as _quote
 
         def _as_image(path: str) -> bool:
             return Path(path).suffix.lower() in _IMAGE_EXTS and not force_document_attachments
-        _image_paths = [p for p, is_voice in media_files if not is_voice and _as_image(p)]
-        _image_paths += [p for p in local_files if _as_image(p)]
+        _image_paths = [p for p, is_voice in media_files if not is_voice and _as_image(p)] + [p for p in local_files if _as_image(p)]
         if _image_paths:
-            await self._send_image_batch(
-                event, [(f"file://{_quote(p)}", "") for p in _image_paths], metadata, human_delay,
-                record_delivery)
+            await self._send_image_batch(event, [(f"file://{_quote(p)}", "") for p in _image_paths], metadata, human_delay, record_delivery)
         chat_id = event.source.chat_id
 
         async def _send_one(path: str, *, is_voice: bool, media_tag: bool) -> SendResult:
