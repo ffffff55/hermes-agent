@@ -989,6 +989,24 @@ def _lap_canonical_rows(b: _PickerBuild) -> None:
             cp.slug, cp.label, cp.slug == b.current_provider, model_ids, "canonical", uncapped_ok=False)
 
 
+def _picker_slug_for_key(provider_key: str) -> str:
+    """Slug a ``providers:`` row should persist for this config key.
+
+    A key that is itself a canonical built-in id must be offered as ``custom:<key>``.
+    Runtime resolution sends that bare name to the built-in and only the ``custom:``
+    spelling reaches the user's entry (``_shadowed_by_builtin``). Emitting the bare
+    key stores a session the next turn cannot route to the user's endpoint (#150823).
+    A key no built-in claims keeps the bare spelling clients already persist.
+    """
+    key = str(provider_key or "").strip()
+    if not key:
+        return key
+    from hermes_cli.runtime_provider_custom import _shadowed_by_builtin
+    if _shadowed_by_builtin(key.lower()):
+        return custom_provider_slug(key, key)
+    return str(provider_key)
+
+
 def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
     """Section 3: ``providers:`` dict entries, grouped by (api_url, credential, api_mode,
     extra_headers) so keyed providers on one endpoint with the same wire protocol collapse into
@@ -1007,10 +1025,13 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
         group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
 
         if group_key not in ep_groups:
-            # slug = first ep_name encountered; probe key from the first member (inline api_key,
-            # else key_env through the per-profile secret scope).
+            # First member's key is the row identity; probe key comes from that member
+            # (inline api_key, else key_env through the per-profile secret scope). A key
+            # a built-in already owns is offered as custom:<key> so the stored slug is
+            # the identity runtime resolution will route to this entry (#150823).
             ep_groups[group_key] = {
-                "slug": ep_name, "name": _group_display_name(display_name), "api_url": api_url, "models": [],
+                "slug": _picker_slug_for_key(ep_name),
+                "name": _group_display_name(display_name), "api_url": api_url, "models": [],
                 "has_explicit_models": False,
                 "api_key": inline_api_key or _scoped_key_env(key_env),
                 "headers": headers, "api_mode": ep_cfg.get("api_mode"),
