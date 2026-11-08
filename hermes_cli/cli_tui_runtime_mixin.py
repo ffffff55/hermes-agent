@@ -420,7 +420,16 @@ class CLITuiRuntimeMixin:
     def _tui_build_application(self, layout, kb, style):
         """Construct the prompt_toolkit Application for the REPL."""
         from cli import CLI_CONFIG, EditingMode, _STEADY_CURSOR, _select_classic_cli_pt_output
+        from prompt_toolkit.key_binding import merge_key_bindings
+        from prompt_toolkit.key_binding.bindings.auto_suggest import load_auto_suggest_bindings
         _cpr_disabled_output = _select_classic_cli_pt_output(sys.stdout)
+
+        # Application merges load_key_bindings() only; PromptSession is what loads
+        # the ghost-text accept keys (right / c-e / c-f / escape-f). That helper
+        # must follow Vi, and app bindings are matched after the default set.
+        # Hermes bindings stay last so a filtered overlay Right (connection nav,
+        # backtrack) still wins (#151352).
+        kb = merge_key_bindings([load_auto_suggest_bindings(), kb])
 
         # Kitty placeholders encode the image id in exact foreground RGB, so the whole app
         # runs 24-bit there. ColorDepth is imported lazily for tests that stub prompt_toolkit.
