@@ -1766,21 +1766,21 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from gateway.run import _redact_gateway_user_facing_secrets
         from agent.redact import redact_terminal_output
         from tools.ansi_strip import strip_ansi
-        from tools.process_registry import transform_process_output
+        from tools.process_registry import COMPLETION_OUTPUT_CHARS, transform_process_output
         _command = getattr(session, "command", "") or ""
         _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
         _raw = transform_process_output(_raw, command=_command, returncode=session.exit_code,
                                         task_id=getattr(session, "task_id", "") or "") if _raw else _raw
         _raw = redact_terminal_output(_raw, _command)
-        # Keep the last ~2000 chars snapped to a line boundary, with a marker when cut.
-        _LIMIT = 2000
-        # Truncate at line boundaries so notifications never start mid-line (fixes #23284). Keep the last
-        # ~2000 chars but snap to the nearest preceding newline, then prepend a truncation marker when
-        # output was cut.
+        # Snap a cut to a line boundary so the notice does not start mid-line (#23284).
+        # The tail's final character being its only newline is that line's own terminator;
+        # slicing past it would report "showing last 0 chars" (#151053).
+        # 0 keeps the documented default; a spawner may ask for more per process.
+        _LIMIT = getattr(session, "completion_output_chars", 0) or COMPLETION_OUTPUT_CHARS
         if len(_raw) > _LIMIT:
             _tail = _raw[-_LIMIT:]
             _nl = _tail.find("\n")
-            _tail = _tail[_nl + 1:] if _nl != -1 else _tail
+            _tail = _tail[_nl + 1:] if 0 <= _nl < len(_tail) - 1 else _tail
             _out = f"[… output truncated — showing last {len(_tail)} chars]\n{_tail}"
         else:
             _out = _raw
