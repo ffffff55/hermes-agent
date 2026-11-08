@@ -63,7 +63,8 @@ from tools.cronjob_job_args import (
     _validate_bot_chat_deliver,
     _validate_context_from_refs,
     _validate_cron_base_url,
-    _validate_cron_script_path)
+    _validate_cron_script_path,
+    _validate_cron_skills)
 from tools.registry import registry, tool_error
 
 
@@ -696,6 +697,7 @@ def _action_create(a: dict[str, Any]) -> str:
         (prompt and _scan_cron_prompt(prompt))
         or (script and _validate_cron_script_path(script))
         or (a["monitor_script"] and _validate_cron_script_path(a["monitor_script"]))
+        or _validate_cron_skills(canonical_skills)
         # A model-supplied base_url must not route a named provider's stored credential
         # to an attacker endpoint.
         or _validate_cron_base_url(a["provider"], a["base_url"])
@@ -881,6 +883,10 @@ def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[st
         updates["catch_up"] = a["catch_up"]
     if skills is not None or skill is not None:
         canonical_skills = _canonical_skills(skill, skills)
+        # Same gate as create: replacing or adding a skill must not store a
+        # name that matches nothing. Clearing (empty list) is not a lookup.
+        if skill_error := _validate_cron_skills(canonical_skills):
+            return skill_error
         updates["skills"] = canonical_skills
         updates["skill"] = canonical_skills[0] if canonical_skills else None
     if a["model"] is not None:

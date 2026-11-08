@@ -440,6 +440,116 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     return None
 
 
+def _plugin_skill_probe(lookup: str) -> tuple[str, Optional[str]]:
+    """Existence half of ``tools.skills_tool._resolve_plugin_skill``.
+
+    ``("found", None)`` — a plugin skill file is installed.
+    ``("miss", None)`` — the qualified name is a definite miss.
+    ``("local", alias)`` — no plugin owns the namespace, so a local
+    ``category:skill`` alias still has to be resolved on disk (``alias`` may
+    be ``None``).
+
+    Stops before ``_serve_plugin_skill``: that path reads and preprocesses
+    SKILL.md and may install the skill's tool dependencies.
+    """
+    from agent.skill_utils import is_valid_namespace, parse_qualified_name
+    from hermes_cli.plugins import discover_plugins, get_plugin_manager
+    from tools.skills_tool import _legacy_portable_skill_name
+
+    name = lookup
+    namespace, bare = parse_qualified_name(name)
+    if namespace == "plugin" and ":" in bare:
+        # Index heading prefix ("plugin:ns:skill") — same strip skill_view does.
+        name = bare
+        namespace, bare = parse_qualified_name(name)
+    if not is_valid_namespace(namespace):
+        return "miss", None
+    discover_plugins()  # idempotent; same call skill_view makes
+    pm = get_plugin_manager()
+    if legacy := _legacy_portable_skill_name(pm, namespace, bare):
+        name = legacy
+        namespace = legacy.partition(":")[0]
+    active_memory_provider = None
+    try:
+        from plugins.memory import (
+            _get_active_memory_provider,
+            _prune_inactive_memory_provider_skills,
+        )
+        active_memory_provider = _get_active_memory_provider()
+        _prune_inactive_memory_provider_skills(active_memory_provider)
+    except Exception:
+        logger.debug("cron skill check: memory-provider skill prune failed", exc_info=True)
+    plugin_skill_md = pm.find_plugin_skill(name)
+    if plugin_skill_md is None and namespace == active_memory_provider:
+        try:
+            from plugins.memory import load_memory_provider
+            load_memory_provider(namespace)
+            plugin_skill_md = pm.find_plugin_skill(name)
+        except Exception:
+            logger.debug("cron skill check: memory-provider skill load failed", exc_info=True)
+    if plugin_skill_md is not None:
+        # A registry entry whose file was deleted is not installed. skill_view
+        # also drops the stale entry; this check only answers existence.
+        return ("found", None) if plugin_skill_md.is_file() else ("miss", None)
+    if pm.list_plugin_skills(namespace):
+        return "miss", None
+    return "local", (f"{namespace}/{bare}" if bare else None)
+
+
+def _cron_skill_is_installed(name: str) -> bool:
+    """True when cron's loader would attach ``name`` (bundle or installed skill).
+
+    Same resolution as ``cron.scheduler_prompt._load_cron_skill_parts``: bundle
+    slug first, then ``normalize_skill_lookup_name`` and the skill_view locate
+    path (directory name, relative path, frontmatter ``name:``, plugin skill).
+    """
+    from agent.skill_bundles import resolve_bundle_command_key
+    from agent.skill_utils import normalize_skill_lookup_name
+    from tools.skills_tool import locate_skill, skill_lookup_path_error, skill_search_dirs
+
+    raw = str(name or "").strip()
+    if not raw:
+        return False
+    if resolve_bundle_command_key(raw.lstrip("/")):
+        return True
+    lookup = normalize_skill_lookup_name(raw)
+    if not lookup or skill_lookup_path_error(lookup):
+        return False
+    local_category_name = None
+    if ":" in lookup:
+        kind, alias = _plugin_skill_probe(lookup)
+        if kind == "found":
+            return True
+        if kind == "miss":
+            return False
+        local_category_name = alias
+        if local_category_name and skill_lookup_path_error(local_category_name):
+            return False
+    roots, _active = skill_search_dirs()
+    error, _skill_dir, skill_md = locate_skill(lookup, local_category_name, roots)
+    return error is None and bool(skill_md)
+
+
+def _validate_cron_skills(skills: Optional[list[str]]) -> Optional[str]:
+    """Error when any skill name matches nothing installed; None when all do.
+
+    A missing ``--script`` file is rejected before the job is saved. A
+    ``--skill`` typo used to be stored and then silently skipped at fire time.
+    Every name in the list is checked; only the missing ones are named.
+    """
+    missing = [name for name in (skills or []) if not _cron_skill_is_installed(name)]
+    if not missing:
+        return None
+    listed = ", ".join(missing)
+    if len(missing) == 1:
+        return (
+            f"Skill not found: {listed}. "
+            "Install it or check the name with `hermes skills list`.")
+    return (
+        f"Skills not found: {listed}. "
+        "Install them or check the names with `hermes skills list`.")
+
+
 def _apply_continuity(
     context_from: Optional[str | list[str]],
     continuity: bool) -> Optional[list[str]]:

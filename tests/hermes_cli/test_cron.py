@@ -14,6 +14,18 @@ from hermes_cli.cron import cron_command
 from hermes_cli.subcommands.cron import build_cron_parser
 
 
+def _install_skill(name: str) -> None:
+    """Plant a profile-local skill so ``--skill`` resolves the way a real install does."""
+    from hermes_constants import get_hermes_home
+
+    skill_dir = get_hermes_home() / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: test skill {name}\n---\n\nInstructions for {name}.\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture()
 def tmp_cron_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
@@ -49,6 +61,8 @@ class TestCronCommandLifecycle:
         assert "Updated job" in capsys.readouterr().out
 
     def test_edit_can_replace_and_clear_skills(self, tmp_cron_dir, capsys):
+        _install_skill("maps")
+        _install_skill("blogwatcher")
         job = create_job(
             prompt="Combine skill outputs",
             schedule="every 1h",
@@ -107,6 +121,8 @@ class TestCronCommandLifecycle:
         assert "Updated job" in out
 
     def test_create_with_multiple_skills(self, tmp_cron_dir, capsys):
+        _install_skill("blogwatcher")
+        _install_skill("maps")
         cron_command(
             Namespace(
                 cron_command="create",
@@ -129,6 +145,95 @@ class TestCronCommandLifecycle:
         assert len(jobs) == 1
         assert jobs[0]["skills"] == ["blogwatcher", "maps"]
         assert jobs[0]["name"] == "Skill combo"
+
+
+def _create_args(**overrides):
+    args = dict(
+        cron_command="create",
+        schedule="every 1h",
+        prompt="x",
+        name="probe-sk",
+        deliver=None,
+        repeat=None,
+        skill=None,
+        skills=None,
+        script=None,
+        workdir=None,
+        no_agent=False,
+    )
+    args.update(overrides)
+    return Namespace(**args)
+
+
+class TestCronSkillValidation:
+    """Regression for #151012: ``hermes cron create --skill`` must reject a name
+    that matches no installed skill, the same way a missing ``--script`` file is
+    rejected, and must not save the job."""
+
+    def test_unknown_skill_is_rejected_and_nothing_is_saved(self, tmp_cron_dir, capsys):
+        rc = cron_command(_create_args(skills=["nonexistent-skill-xyz"]))
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Failed to create job" in out
+        assert "nonexistent-skill-xyz" in out
+        assert "not found" in out.lower()
+        assert list_jobs(include_disabled=True) == []
+
+    def test_every_skill_name_is_checked(self, tmp_cron_dir, capsys):
+        _install_skill("kept-skill")
+        rc = cron_command(_create_args(
+            skills=["kept-skill", "missing-skill-aaa", "missing-skill-bbb"]))
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "missing-skill-aaa" in out
+        assert "missing-skill-bbb" in out
+        assert list_jobs(include_disabled=True) == []
+
+    def test_installed_skill_is_accepted(self, tmp_cron_dir, capsys):
+        _install_skill("kept-skill")
+        rc = cron_command(_create_args(skills=["kept-skill"], name="Skill combo"))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Created job" in out
+        jobs = list_jobs()
+        assert len(jobs) == 1
+        assert jobs[0]["skills"] == ["kept-skill"]
+        assert jobs[0]["name"] == "Skill combo"
+
+    def test_edit_unknown_skill_does_not_save(self, tmp_cron_dir, capsys):
+        job = create_job(prompt="Keep me", schedule="every 1h", name="keep")
+        original = get_job(job["id"])
+
+        rc = cron_command(Namespace(
+            cron_command="edit",
+            job_id=job["id"],
+            schedule="every 2h",
+            prompt="should not stick",
+            name="renamed",
+            deliver=None,
+            repeat=None,
+            skill=None,
+            skills=["missing-skill-xyz"],
+            clear_skills=False,
+            add_skills=None,
+            remove_skills=None,
+            script=None,
+            workdir=None,
+            no_agent=None,
+        ))
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Failed to update job" in out
+        assert "missing-skill-xyz" in out
+        updated = get_job(job["id"])
+        assert updated["skills"] == (original.get("skills") or [])
+        assert updated["prompt"] == original["prompt"]
+        assert updated["name"] == original["name"]
+        assert updated["schedule_display"] == original["schedule_display"]
 
 
 class TestUnverifiedDeliveryVisibility:
