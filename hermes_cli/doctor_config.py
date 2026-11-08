@@ -16,6 +16,38 @@ def _has_provider_env_config(content: str) -> bool:
     return any(key in content for key in _PROVIDER_ENV_HINTS)
 
 
+def _mapping_has_provider_hint(env_map: dict) -> bool:
+    """True when *env_map* holds a non-empty ``_PROVIDER_ENV_HINTS`` value."""
+    from hermes_cli.doctor import _PROVIDER_ENV_HINTS
+    return any(str(env_map.get(key) or "").strip() for key in _PROVIDER_ENV_HINTS)
+
+
+def _provider_env_configured(profile_content: str, profile_env) -> bool:
+    """Provider hint in the profile file, the shared root ``.env``, or the process env.
+
+    A named profile's ``.env`` often holds only platform tokens. Provider
+    credentials are inherited from the shared Hermes-root ``.env`` and from
+    the process environment; scanning the profile file alone tells every
+    working multi-profile install to run ``hermes setup`` (#151049). A key
+    set in any of those scopes counts. Values are never printed.
+    """
+    if _has_provider_env_config(profile_content):
+        return True
+    from agent.secret_scope import load_env_file
+    from hermes_cli.doctor import _PROVIDER_ENV_HINTS
+    from hermes_constants import get_default_hermes_root
+
+    process = {key: os.environ.get(key) for key in _PROVIDER_ENV_HINTS}
+    if _mapping_has_provider_hint(process):
+        return True
+    # Profile file overlaid on the shared root file. The content scan above
+    # already accepted a hint spelled in the profile text; this reads assignments.
+    for path in (get_default_hermes_root() / ".env", profile_env):
+        if _mapping_has_provider_hint(load_env_file(path)):
+            return True
+    return False
+
+
 # Legacy config keys still read for back-compat: warn-only with the modern replacement, never auto-migrated
 # (migrations live in config.py). (section, key, replacement)
 _DEPRECATED_CONFIG_KEYS: tuple[tuple[str, str, str], ...] = (
@@ -180,7 +212,7 @@ def _check_env_file(should_fix: bool, f: Finding) -> None:
             content = env_path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             content = env_path.read_text(encoding="latin-1")
-        if not check_bool(_has_provider_env_config(content), "API key or custom endpoint configured", f"No API key found in {_DHH}/.env"):
+        if not check_bool(_provider_env_configured(content, env_path), "API key or custom endpoint configured", f"No API key found in {_DHH}/.env"):
             f.issues.append("Run 'hermes setup' to configure API keys")
     elif (PROJECT_ROOT / '.env').exists():  # project root as fallback
         check_ok(".env file exists (in project directory)")
