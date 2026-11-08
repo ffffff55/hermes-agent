@@ -573,12 +573,12 @@ it. Any run that reaches the model clears the hold. One-shot jobs are not held.
 
 A recurring job that keeps failing with the *same* error alerts you **once**,
 not on every run. Each failure is recorded as a durable **incident**, keyed by
-the job plus a normalized signature of the error text (case, whitespace and
-measured durations such as `idle for 603s` are ignored), in the same per-profile
-ledger database as the execution history; the first failure of a signature is
-always delivered, and repeats are then withheld while the incident is `alerted`
-(the run is still recorded — `hermes cron runs` and the failure streak see it,
-only the ping is held back).
+the job plus a normalized signature of the error text (case, whitespace,
+measured durations such as `idle for 603s`, and timestamps are ignored), in
+the same per-profile ledger database as the execution history; the first failure
+of a signature is always delivered, and repeats are then withheld while the
+incident is `alerted` (the run is still recorded — `hermes cron runs` and the
+failure streak see it, only the ping is held back).
 
 ```yaml
 cron:

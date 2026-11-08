@@ -1,4 +1,7 @@
-"""Durable cron failure incidents: signature dedup, lifecycle, ack, CLI."""
+"""Durable cron failure incidents: signature dedup, lifecycle, ack, CLI.
+
+Regression for #151386: timestamps in an error must not change its signature.
+"""
 
 from __future__ import annotations
 
@@ -143,6 +146,98 @@ def test_error_change_mints_new_incident(monkeypatch, tmp_path):
     assert id1 != id2
     assert new2 is True
     assert inc.count_incidents() == 2
+
+
+def _timestamped_failure(when: str, day: str, clock: str, *, cause: str) -> str:
+    """Same failure shape as a timestamped script log. ``when`` is the log
+    prefix (space datetime or ISO), ``day`` is a bare date in prose, and
+    ``clock`` is a bare ``HH:MM:SS``."""
+    return (
+        "script exited with code 1 stdout: "
+        f"[{when}] === hermes weekly backup start (monday {day}) === "
+        f"[{when}] error: {cause} or not writable at /media/backup clock {clock}"
+    )
+
+
+def test_timestamps_do_not_split_or_reopen_an_incident(monkeypatch, tmp_path):
+    """Regression for #151386. The same failure logged a week apart — bracket
+    timestamps and a bare ``YYYY-MM-DD`` — is one signature. Repeating it
+    refreshes that incident, and ack keeps the next timestamped repeat closed
+    instead of minting a new alerting incident. A different cause still mints.
+    """
+    inc = _point_db(monkeypatch, tmp_path)
+    cause = "external drive not mounted"
+    week1 = _timestamped_failure(
+        "2026-09-07 02:00:03", "2026-09-07", "02:00:03", cause=cause
+    )
+    week2 = _timestamped_failure(
+        "2026-09-14 02:00:34", "2026-09-14", "02:00:34", cause=cause
+    )
+    week3 = _timestamped_failure(
+        "2026-09-21T02:00:41.120Z", "2026-09-21", "02:00:41.120", cause=cause
+    )
+    week4 = _timestamped_failure(
+        "2026-09-28T02:00:55+05:30", "2026-09-28", "02:00:55", cause=cause
+    )
+
+    signatures = {
+        inc._error_signature("job-1", text)
+        for text in (week1, week2, week3, week4)
+    }
+    assert len(signatures) == 1, "timestamps must not change the dedup signature"
+
+    id1, new1 = inc.upsert_incident("job-1", week1)
+    id2, new2 = inc.upsert_incident("job-1", week2)
+    assert id1 == id2
+    assert new1 is True
+    assert new2 is False
+    assert inc.count_incidents() == 1
+    refreshed = inc.get_incident(id1)
+    assert refreshed["state"] == "detected"
+    assert "2026-09-14" in refreshed["error"]
+    assert "2026-09-07" not in refreshed["error"]
+
+    assert inc.ack_incident(id1) is True
+    id3, new3 = inc.upsert_incident("job-1", week3)
+    assert id3 == id1
+    assert new3 is False
+    assert inc.count_incidents() == 1
+    assert inc.count_incidents(state="detected") == 0
+    assert inc.get_incident(id1)["state"] == "closed"
+
+    other = _timestamped_failure(
+        "2026-10-05 02:00:11", "2026-10-05", "02:00:11", cause="disk quota exceeded"
+    )
+    assert inc._error_signature("job-1", other) != inc._error_signature("job-1", week1)
+    id4, new4 = inc.upsert_incident("job-1", other)
+    assert new4 is True
+    assert id4 != id1
+    assert inc.get_incident(id4)["state"] == "detected"
+    assert inc.get_incident(id1)["state"] == "closed"
+    assert inc.count_incidents() == 2
+
+
+def test_status_and_exit_codes_stay_in_the_error_signature():
+    """HTTP statuses and process exit codes are not dates. Masking timestamps
+    must leave them in the signature so a different code is a new incident.
+    """
+    sig = incidents._error_signature
+    assert sig("job-1", "HTTP 500: request failed") != sig(
+        "job-1", "HTTP 404: request failed"
+    )
+    assert sig("job-1", "script exited with code 1") != sig(
+        "job-1", "script exited with code 2"
+    )
+    dated_500 = "[2026-09-07 02:00:03] HTTP 500: request failed"
+    dated_500_later = "[2026-09-14T02:00:34Z] HTTP 500: request failed"
+    dated_404 = "[2026-09-14 02:00:34] HTTP 404: request failed"
+    assert sig("job-1", dated_500) == sig("job-1", dated_500_later)
+    assert sig("job-1", dated_500) != sig("job-1", dated_404)
+    exit_1 = "script exited with code 1 at 2026-09-07 02:00:03"
+    exit_1_later = "script exited with code 1 at 2026-09-14T02:00:34+00:00"
+    exit_2 = "script exited with code 2 at 2026-09-14 02:00:34"
+    assert sig("job-1", exit_1) == sig("job-1", exit_1_later)
+    assert sig("job-1", exit_1) != sig("job-1", exit_2)
 
 
 # ── Redaction / classification ─────────────────────────────────────────────

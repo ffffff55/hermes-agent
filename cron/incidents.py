@@ -41,10 +41,20 @@ _FAILURE_TYPE_ORDER = (
 )
 MAX_ERROR_CHARS = 500
 _MAX_SIGNATURE_ERROR_CHARS = 200
-# Measured durations ("idle for 603s", "retry in 12.5 seconds") differ run to run for the same
-# failure, so they are masked out of the signature. Status codes and other numbers still count.
+# Measured durations ("idle for 603s", "retry in 12.5 seconds") and timestamps
+# ("[2026-09-07 02:00:03]", "monday 2026-09-07") differ run to run for the same
+# failure, so they are masked out of the signature. Status codes and other
+# numbers still count.
 _DURATION_RE = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:ms|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b"
+)
+# Same run-to-run instability as durations. Case-insensitive because
+# _normalize_error lowercases before signing, and ISO "T"/"Z" must still match.
+_TIMESTAMP_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}"
+    r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"\b|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b",
+    re.IGNORECASE,
 )
 
 _lock = threading.RLock()
@@ -130,7 +140,9 @@ def _redact_error(error: str) -> str:
 
 def _error_signature(job_id: str, error: str) -> str:
     """Dedup key: stable for same job + same normalized error prefix."""
-    normalized = _DURATION_RE.sub("#s", _normalize_error(error))[:_MAX_SIGNATURE_ERROR_CHARS]
+    normalized = _TIMESTAMP_RE.sub(
+        "#t", _DURATION_RE.sub("#s", _normalize_error(error))
+    )[:_MAX_SIGNATURE_ERROR_CHARS]
     return hashlib.sha256(job_id.encode() + normalized.encode()).hexdigest()[:12]
 
 
