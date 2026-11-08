@@ -151,7 +151,7 @@ def _check_body(body: str, skill_dir: Optional[Path]) -> Iterator[LintFinding]:
     # Dangling links. Only references/, templates/, assets/ are reliably skill-owned;
     # `scripts/` is excluded because dev skills legitimately cite repo-root scripts.
     seen: set[str] = set()
-    for match in re.finditer(r"(references|templates|assets)/[\w./-]+", body):
+    for match in re.finditer(r"(references|templates|assets)/[\w./*-]+", body):
         rel = match.group(0)
         if rel in seen or "*" in rel or rel.endswith("/"):  # dupes, placeholders, globs
             continue

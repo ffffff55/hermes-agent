@@ -1,4 +1,8 @@
-"""Tests for tools/skill_linter.py — the advisory SKILL.md convention linter."""
+"""Tests for tools/skill_linter.py — the advisory SKILL.md convention linter.
+
+Regression for NousResearch/hermes-agent#151226: a glob under references/,
+templates/, or assets/ is a placeholder, not a dangling file path.
+"""
 
 
 from tools.skill_linter import (
@@ -126,6 +130,21 @@ def test_present_reference_link_not_flagged(tmp_path):
     content = CLEAN + "\nSee references/detail.md for detail.\n"
     findings = lint_content(content, skill_dir=skill_dir)
     assert "dangling-reference" not in _rules(findings)
+
+
+def test_glob_reference_not_flagged_when_match_exists(tmp_path):
+    # The exemption skips paths containing '*', but the matcher used to stop
+    # before the star, so references/foo-*.md was reported as references/foo-.
+    skill_dir = tmp_path / "my-skill"
+    (skill_dir / "references").mkdir(parents=True)
+    (skill_dir / "references" / "foo-1.md").write_text("x")
+    content = CLEAN + "\nSee references/foo-*.md and references/missing.md for detail.\n"
+    dangling = [
+        f for f in lint_content(content, skill_dir=skill_dir)
+        if f.rule == "dangling-reference"
+    ]
+    assert any("references/missing.md" in f.message for f in dangling)
+    assert not any("*" in f.message or "foo-" in f.message for f in dangling)
 
 
 def test_posix_primitive_without_platforms_warns(tmp_path):
