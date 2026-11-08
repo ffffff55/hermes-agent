@@ -1044,6 +1044,146 @@ class TestReconnectSeenUidsRestore(unittest.TestCase):
         asyncio.run(adapter.disconnect())
 
 
+class TestSmtpFailureKeepsReceive(unittest.TestCase):
+    """IMAP stays up when the SMTP probe cannot connect (#151356).
+
+    A failed SMTP probe used to make ``connect()`` return False, so the poll loop
+    never started, and the UID SEARCH ALL done on that attempt (or on the reconnect
+    that finally succeeded) marked mail received during the outage as already seen.
+    """
+
+    def _make_adapter(self):
+        from gateway.config import PlatformConfig
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }):
+            from plugins.platforms.email.adapter import EmailAdapter
+            return EmailAdapter(PlatformConfig(enabled=True))
+
+    def setUp(self):
+        from plugins.platforms.email.adapter import EmailAdapter
+        EmailAdapter._seen_uids_snapshot.clear()
+
+    tearDown = setUp
+
+    def _imap(self, box):
+        mock_imap = MagicMock()
+
+        def uid_handler(command, *args):
+            if command == "search":
+                criteria = args[-1] if args else ""
+                payload = box["unseen"] if criteria == "UNSEEN" else box["all"]
+                return ("OK", [payload])
+            if command == "fetch":
+                uid = args[0]
+                return ("OK", [(uid, box["raw"][uid])])
+            return ("OK", [b""])
+
+        mock_imap.uid.side_effect = uid_handler
+        return mock_imap
+
+    @staticmethod
+    def _raw(uid_label: str) -> bytes:
+        msg = MIMEText(f"body {uid_label}", "plain", "utf-8")
+        msg["From"] = "user@test.com"
+        msg["Subject"] = f"During outage {uid_label}"
+        msg["Message-ID"] = f"<outage-{uid_label}@test.com>"
+        return msg.as_bytes()
+
+    @staticmethod
+    async def _quiet_inbox():
+        return None
+
+    def test_smtp_failure_starts_polling_and_send_reports_unavailable(self):
+        """IMAP ok + SMTP timeout keeps the poll loop and does not return False."""
+        import asyncio
+        adapter = self._make_adapter()
+        box = {"all": b"1 2 3", "unseen": b"3", "raw": {b"3": self._raw("3")}}
+        smtp_calls = {"n": 0}
+
+        def smtp_down():
+            smtp_calls["n"] += 1
+            raise TimeoutError("timed out")
+
+        adapter._connect_smtp = smtp_down
+        adapter._check_inbox = self._quiet_inbox
+
+        async def run():
+            with self.assertLogs("plugins.platforms.email.adapter", level="WARNING") as logs:
+                ok = await adapter.connect()
+            self.assertTrue(ok)
+            self.assertIsNone(adapter.fatal_error_code)
+            self.assertTrue(adapter._running)
+            self.assertIsNotNone(adapter._poll_task)
+            self.assertFalse(adapter._poll_task.done())
+            self.assertTrue(adapter.send_path_degraded)
+            self.assertTrue(adapter.DEGRADED_STATUS_MESSAGE.startswith("send_unavailable"))
+            self.assertIn("timed out", adapter.DEGRADED_STATUS_MESSAGE)
+            # UID SEARCH ALL must not mark the waiting message seen.
+            self.assertNotIn(b"1", adapter._seen_uids)
+            self.assertNotIn(b"3", adapter._seen_uids)
+            result = await adapter.send("user@test.com", "cannot reply yet")
+            fetched = adapter._fetch_new_messages(lambda _c: True)
+            await adapter.disconnect()
+            return logs, result, fetched
+
+        with patch("imaplib.IMAP4_SSL", return_value=self._imap(box)):
+            logs, result, fetched = asyncio.run(run())
+
+        self.assertTrue(any("1 UNSEEN" in line for line in logs.output))
+        self.assertFalse(result.success)
+        self.assertTrue(result.error.startswith("send_unavailable"))
+        self.assertIn("timed out", result.error)
+        self.assertTrue(result.retryable)
+        self.assertEqual(smtp_calls["n"], 1)  # send() does not probe SMTP again
+        self.assertEqual([item["message_id"] for item in fetched], ["<outage-3@test.com>"])
+
+    def test_degraded_connect_does_not_let_later_reconnect_seed_waiting_mail(self):
+        """Mail present while SMTP was down is still fetched after SMTP recovers."""
+        import asyncio
+        first, second = self._make_adapter(), self._make_adapter()
+        box = {
+            "all": b"1 2 3",
+            "unseen": b"3",
+            "raw": {b"3": self._raw("3"), b"4": self._raw("4")},
+        }
+
+        def smtp_down():
+            raise TimeoutError("timed out")
+
+        first._connect_smtp = smtp_down
+        first._check_inbox = self._quiet_inbox
+        second._connect_smtp = lambda: MagicMock()
+        second._check_inbox = self._quiet_inbox
+
+        async def run():
+            self.assertTrue(await first.connect())
+            self.assertEqual(first._seen_uids, set())
+            await first.disconnect()
+            # SMTP is back. UID 4 arrived during the outage; 3 was already UNSEEN.
+            box["all"] = b"1 2 3 4"
+            box["unseen"] = b"3 4"
+            self.assertTrue(await second.connect(is_reconnect=True))
+            # The successful reconnect must restore the degraded baseline (empty),
+            # not UID SEARCH ALL, or 3 and 4 are skipped forever.
+            self.assertEqual(second._seen_uids, set())
+            self.assertFalse(second.send_path_degraded)
+            fetched = second._fetch_new_messages(lambda _c: True)
+            await second.disconnect()
+            return fetched
+
+        with patch("imaplib.IMAP4_SSL", return_value=self._imap(box)):
+            fetched = asyncio.run(run())
+
+        self.assertEqual(
+            [item["message_id"] for item in fetched],
+            ["<outage-3@test.com>", "<outage-4@test.com>"],
+        )
+
+
 class TestSendEmailStandalone(unittest.TestCase):
     """Test the standalone _send_email function in send_message_tool."""
 

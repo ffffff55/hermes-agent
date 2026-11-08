@@ -447,6 +447,12 @@ def _attach_file(msg: MIMEMultipart, path: Path, filename: str) -> None:
         msg.attach(part)
 
 
+def _uid_search(imap: imaplib.IMAP4, criteria: str) -> list:
+    """UIDs from ``UID SEARCH criteria``, or ``[]`` when the server returns none."""
+    status, data = imap.uid("search", None, criteria)
+    return data[0].split() if status == "OK" and data and data[0] else []
+
+
 class EmailAdapter(BasePlatformAdapter):
     """Email gateway adapter using IMAP (receive) and SMTP (send)."""
     serial_receive_loop = True  # the IMAP poll loop awaits each message before dispatching the next
@@ -491,6 +497,10 @@ class EmailAdapter(BasePlatformAdapter):
         self._authserv_id = (extra.get("authserv_id", "") or _get_secret("EMAIL_AUTHSERV_ID", "")).strip().lower()
         self._seen_uids: set = set()
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
+        # Set when IMAP is up but the SMTP probe could not connect. Receive keeps polling;
+        # send() fails with this reason instead of connect() refusing to start.
+        self._send_unavailable: Optional[str] = None
+        self._send_unavailable_retryable = True
         self._poll_task: Optional[asyncio.Task] = None
         self._last_fetch_failed, self._last_fetch_error = False, ""  # "checked, nothing new" vs "the check itself failed"
         # chat_id (sender email) -> last subject + message-id for threading
@@ -498,6 +508,31 @@ class EmailAdapter(BasePlatformAdapter):
         # "the check itself failed" (#80016).
         self._thread_context: dict[str, dict[str, str]] = {}
         logger.info("[Email] Adapter initialized for %s", self._address)
+
+    @property
+    def send_path_degraded(self) -> bool:
+        """True while SMTP is down. The runner stamps platform state ``retrying`` from this."""
+        return bool(getattr(self, "_send_unavailable", None))
+
+    @property
+    def DEGRADED_STATUS_MESSAGE(self) -> str:
+        """Send-unavailable reason when SMTP is down; the base message otherwise."""
+        reason = getattr(self, "_send_unavailable", None)
+        if reason:
+            return reason
+        return BasePlatformAdapter.DEGRADED_STATUS_MESSAGE
+
+    def _blocked_send_result(self) -> Optional[SendResult]:
+        """Fail fast while the SMTP probe says send is down.
+
+        Re-probing on each send would block on the same timeout the probe already hit.
+        """
+        reason = getattr(self, "_send_unavailable", None)
+        if not reason:
+            return None
+        return SendResult(
+            success=False, error=reason, retryable=getattr(self, "_send_unavailable_retryable", True),
+        )
 
     def _trim_seen_uids(self) -> None:
         """Keep only the highest half of UIDs once over the cap (UIDs are monotonic; UNSEEN prevents re-delivery)."""
@@ -558,33 +593,63 @@ class EmailAdapter(BasePlatformAdapter):
         self._set_fatal_error(code, detail, retryable=retryable)
         return False
 
-    def _probe_imap(self, is_reconnect: bool) -> bool:
-        """Connection test + seen-UID baseline. Sets a fatal error and returns False on failure."""
+    def _probe_imap(self) -> Optional[tuple[list, list]]:
+        """Login and read ALL/UNSEEN UIDs. Sets a fatal error and returns None on failure.
+
+        Does not touch ``_seen_uids``. The baseline is applied only after the SMTP probe, so a
+        send outage cannot mark the mailbox seen before receive starts.
+        """
         try:
             with self._inbox() as imap:
-                snapshot = self._seen_uids_snapshot.get(self._address)
-                if is_reconnect and snapshot is not None:
-                    # Same-process reconnect: restore the previous adapter's baseline so mail that
-                    # arrived during the outage stays eligible for the next poll.
-                    self._seen_uids = set(snapshot)
-                    passed = "[Email] IMAP reconnect test passed. Restored %d seen UIDs; messages received during the outage will be processed."
-                else:  # first connect (or no snapshot): mark all existing messages seen
-                    status, data = imap.uid("search", None, "ALL")
-                    self._seen_uids.update(data[0].split() if status == "OK" and data and data[0] else ())
-                    passed = "[Email] IMAP connection test passed. %d existing messages skipped."
-                self._trim_seen_uids()
-                logger.info(passed, len(self._seen_uids))
-            self._seen_uids_snapshot[self._address] = set(self._seen_uids)
-            return True
+                return _uid_search(imap, "ALL"), _uid_search(imap, "UNSEEN")
         except Exception as e:
             # Always set an explicit fatal code, else the gateway treats every failure as transient with zero
             # owner signal. retryable=True because imaplib raises the same generic IMAP4.error for bad credentials
             # AND transient NOs (Gmail "too many simultaneous connections"); loops surface via NEEDS_ATTENTION.
-            return self._fail("[Email] IMAP connection failed: %s", e, "email_imap_connect_error",
-                              f"IMAP connection to {self._imap_host}:{self._imap_port} failed: {e}", retryable=True)
+            self._fail("[Email] IMAP connection failed: %s", e, "email_imap_connect_error",
+                       f"IMAP connection to {self._imap_host}:{self._imap_port} failed: {e}", retryable=True)
+            return None
+
+    def _apply_seen_baseline(self, is_reconnect: bool, all_uids: list, unseen_uids: list, *, seed_existing: bool) -> None:
+        """Record which UIDs the next poll should skip.
+
+        ``seed_existing`` is False when SMTP is down. UID SEARCH ALL in that state is what used
+        to drop mail that arrived during the outage: the failed connect stored every current UID,
+        and the reconnect that finally succeeded restored that snapshot (or seeded ALL again).
+        """
+        snapshot = self._seen_uids_snapshot.get(self._address)
+        if not seed_existing:
+            # Keep an already-processed baseline when this process has one, but do not union ALL.
+            if snapshot is not None:
+                self._seen_uids = set(snapshot)
+            waiting = sum(1 for uid in unseen_uids if uid not in self._seen_uids)
+            logger.warning(
+                "[Email] SMTP unavailable; %d UNSEEN message(s) waiting. Receive continues; send is degraded.",
+                waiting,
+            )
+        elif is_reconnect and snapshot is not None:
+            # Same-process reconnect: restore the previous adapter's baseline so mail that
+            # arrived during the outage stays eligible for the next poll.
+            self._seen_uids = set(snapshot)
+            logger.info(
+                "[Email] IMAP reconnect test passed. Restored %d seen UIDs; messages received during the outage will be processed.",
+                len(self._seen_uids),
+            )
+        else:  # first connect (or no snapshot): mark all existing messages seen
+            self._seen_uids.update(all_uids)
+            logger.info("[Email] IMAP connection test passed. %d existing messages skipped.", len(self._seen_uids))
+        self._trim_seen_uids()
+        # Persist the baseline we actually kept, including an empty one. A later successful
+        # reconnect restores it instead of falling through to UID SEARCH ALL.
+        self._seen_uids_snapshot[self._address] = set(self._seen_uids)
 
     def _probe_smtp(self) -> bool:
-        """SMTP connect + login test. Sets a fatal error and returns False on failure."""
+        """SMTP connect + login. Auth failure is fatal (returns False).
+
+        A connection failure is not fatal for receive: record ``send_unavailable`` and return
+        True so ``connect`` still starts the poll loop. ``_send_unavailable`` is cleared when
+        the probe succeeds.
+        """
         try:
             smtp = self._connect_smtp()
             try:
@@ -592,6 +657,8 @@ class EmailAdapter(BasePlatformAdapter):
             finally:
                 smtp.quit()
             logger.info("[Email] SMTP connection test passed.")
+            self._send_unavailable = None
+            self._send_unavailable_retryable = True
             return True
         except smtplib.SMTPAuthenticationError as e:
             # Typed auth failure (535 & friends) can never self-heal, so drop out of the reconnect queue — unambiguous, unlike IMAP4.error.
@@ -599,19 +666,28 @@ class EmailAdapter(BasePlatformAdapter):
                               f"SMTP authentication failed for {self._address}: {e}. Check EMAIL_PASSWORD (for Gmail/Outlook "
                               "this must be an app password, not the account password).", retryable=False)
         except Exception as e:
-            return self._fail("[Email] SMTP connection failed: %s", e, "email_smtp_connect_error",
-                              f"SMTP connection to {self._smtp_host} failed: {e}", retryable=True)
+            logger.error("[Email] SMTP connection failed: %s", e)
+            self._send_unavailable = f"send_unavailable: SMTP connection to {self._smtp_host} failed: {e}"
+            self._send_unavailable_retryable = True
+            return True
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        """Connect to the IMAP server and start polling for new messages."""
+        """Connect to the IMAP server and start polling for new messages.
+
+        SMTP connection failure still starts the poll loop. ``send()`` fails with
+        ``send_unavailable`` and platform state shows send degraded (``send_path_degraded``).
+        """
         # Validate up front so a missing host is an actionable config error, not IMAP4_SSL("") raising ``[Errno 8]``.
         required = (("EMAIL_ADDRESS", self._address), ("EMAIL_PASSWORD", self._password), ("EMAIL_IMAP_HOST", self._imap_host), ("EMAIL_SMTP_HOST", self._smtp_host))
         if missing := [name for name, value in required if not value]:
             message = f"Not configured — missing {', '.join(missing)}. Set it via `hermes gateway setup` (env) or platforms.email in config.yaml."
             # Non-retryable: a blank-but-present env var used to drive an indefinite retry loop that leaked until OOM.
             return self._fail("[Email] %s", message, "email_missing_configuration", message, retryable=False)
-        if not self._probe_imap(is_reconnect) or not self._probe_smtp():
+        mailbox = self._probe_imap()
+        if mailbox is None or not self._probe_smtp():
             return False
+        all_uids, unseen_uids = mailbox
+        self._apply_seen_baseline(is_reconnect, all_uids, unseen_uids, seed_existing=not self._send_unavailable)
         if self._require_authenticated_sender and not self._authserv_id and self._address not in EmailAdapter._missing_pin_warned:
             EmailAdapter._missing_pin_warned.add(self._address)
             logger.warning("[Email] %s: %s.%s", self._address, _MISSING_AUTHSERV_REASON, _MISSING_AUTHSERV_HINT)
@@ -845,6 +921,8 @@ class EmailAdapter(BasePlatformAdapter):
 
     async def _run_send(self, fn, args: tuple, log_fmt: str, *log_args) -> SendResult:
         """Run a blocking SMTP sender in the executor; wrap its Message-ID in a SendResult."""
+        if (blocked := self._blocked_send_result()) is not None:
+            return blocked
         try:
             return SendResult(success=True, message_id=await asyncio.get_running_loop().run_in_executor(None, fn, *args))
         except Exception as e:
@@ -920,6 +998,8 @@ class EmailAdapter(BasePlatformAdapter):
         """One email per batch: local files attached, URL images linked in the body (no remote download); base-class fallback on failure."""
         if not images:
             return SendResult(success=False, error="no images to send")
+        if (blocked := self._blocked_send_result()) is not None:
+            return blocked
         from urllib.parse import unquote as _unquote
         body_parts, local_paths = [], []
         for image_url, alt_text in images:

@@ -196,7 +196,7 @@ Hermes acts on a message only when the `Authentication-Results` header stamped b
 | Problem | Solution |
 |---------|----------|
 | **"IMAP connection failed"** at startup | Verify `EMAIL_IMAP_HOST` and `EMAIL_IMAP_PORT`. Ensure IMAP is enabled on the account. For Gmail, enable it in Settings → Forwarding and POP/IMAP. |
-| **"SMTP connection failed"** at startup | Verify `EMAIL_SMTP_HOST` and `EMAIL_SMTP_PORT`. Check that your password is correct (use App Password for Gmail). |
+| **"SMTP connection failed"** at startup | Verify `EMAIL_SMTP_HOST` and `EMAIL_SMTP_PORT`. Incoming mail is still read; replies fail with `send_unavailable` until SMTP connects. A wrong password is a separate **"SMTP authentication failed"** and does not start the mailbox. |
 | **Messages not received** | Check `EMAIL_ALLOWED_USERS` includes the sender's email. If the gateway log shows `authserv-id is not configured`, set `EMAIL_AUTHSERV_ID` to the exact id on the topmost `Authentication-Results` header your server writes. Check spam folder — some providers flag automated replies. |
 | **"Authentication failed"** | For Gmail, you must use an App Password, not your regular password. Ensure 2FA is enabled first. |
 | **Duplicate replies** | Ensure only one gateway instance is running. Check `hermes gateway status`. |

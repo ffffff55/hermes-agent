@@ -157,7 +157,7 @@ platforms:
 | 问题 | 解决方案 |
 |---------|----------|
 | 启动时出现 **"IMAP connection failed"** | 检查 `EMAIL_IMAP_HOST` 和 `EMAIL_IMAP_PORT`。确保账户已启用 IMAP。对于 Gmail，在设置 → 转发和 POP/IMAP 中启用。 |
-| 启动时出现 **"SMTP connection failed"** | 检查 `EMAIL_SMTP_HOST` 和 `EMAIL_SMTP_PORT`。确认密码正确（Gmail 请使用应用专用密码）。 |
+| 启动时出现 **"SMTP connection failed"** | 检查 `EMAIL_SMTP_HOST` 和 `EMAIL_SMTP_PORT`。收信仍会继续；在 SMTP 连通之前，发信会以 `send_unavailable` 失败。密码错误是另一条 **"SMTP authentication failed"**，不会启动邮箱。 |
 | **未收到邮件** | 检查 `EMAIL_ALLOWED_USERS` 是否包含发件人邮箱。若 gateway 日志出现 `authserv-id is not configured`，请将 `EMAIL_AUTHSERV_ID` 设为服务器写入的最上层 `Authentication-Results` 头中的精确 id。检查垃圾邮件文件夹——部分服务商会将自动回复标记为垃圾邮件。 |
 | **"Authentication failed"** | 对于 Gmail，必须使用应用专用密码，而非常规密码。请先确保已启用双重验证。 |
 | **重复回复** | 确保只有一个 gateway 实例在运行。检查 `hermes gateway status`。 |

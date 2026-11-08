@@ -254,12 +254,14 @@ class TestEmailConnectClassification:
         assert adapter.fatal_error_retryable is False
 
     @pytest.mark.asyncio
-    async def test_smtp_transient_failure_stays_retryable(self, monkeypatch):
+    async def test_smtp_transient_failure_keeps_receive(self, monkeypatch):
+        # A refused SMTP port used to be a retryable fatal connect: the poll loop
+        # never started, and the reconnect that finally succeeded seeded UID SEARCH ALL.
         adapter = self._make_adapter(monkeypatch)
         from plugins.platforms.email import adapter as email_adapter
 
         imap = MagicMock()
-        imap.uid.return_value = ("OK", [b""])
+        imap.uid.return_value = ("OK", [b"1 2"])
         monkeypatch.setattr(email_adapter.imaplib, "IMAP4_SSL", lambda *a, **k: imap)
 
         def _smtp_fail():
@@ -267,10 +269,28 @@ class TestEmailConnectClassification:
 
         monkeypatch.setattr(adapter, "_connect_smtp", _smtp_fail)
         ok = await adapter.connect()
-
-        assert ok is False
-        assert adapter.fatal_error_code == "email_smtp_connect_error"
-        assert adapter.fatal_error_retryable is True
+        try:
+            assert ok is True
+            assert adapter.fatal_error_code is None
+            assert adapter._running is True
+            assert adapter._poll_task is not None
+            assert adapter.send_path_degraded is True
+            assert adapter.DEGRADED_STATUS_MESSAGE.startswith("send_unavailable")
+            assert b"1" not in adapter._seen_uids
+            result = await adapter.send("user@example.com", "hi")
+            assert result.success is False
+            assert result.error.startswith("send_unavailable")
+            assert "connection refused" in result.error
+            assert result.retryable is True
+        finally:
+            adapter._running = False
+            task = adapter._poll_task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 # ── Gateway: needs_attention escalation ────────────────────────────────
