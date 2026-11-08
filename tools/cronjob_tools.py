@@ -673,6 +673,32 @@ def _with_guidance(result: dict[str, Any], job: dict[str, Any], deliver: Optiona
     return result
 
 
+def _unregistered_create_result(exc) -> str:
+    """Job is stored; the external scheduler did not take the first trigger.
+
+    ``success`` stays false so a model does not treat remote registration as
+    done (``retry_create`` is false — a second create would duplicate the
+    job). ``user_message`` is what CLI and ``/cron`` print; ``error`` stays
+    the raw exception string for callers that already match on it.
+    """
+    partial = exc.to_dict()
+    error = partial.pop("error")
+    view = _format_job(exc.job)
+    partial.update(
+        success=False,
+        user_message=exc.user_message(),
+        name=view["name"],
+        skill=view.get("skill"),
+        skills=view.get("skills") or [],
+        schedule=view["schedule"],
+        repeat=view.get("repeat"),
+        deliver=view.get("deliver", "local"),
+        next_run_at=view.get("next_run_at"),
+        job=view,
+    )
+    return tool_error(error, **partial)
+
+
 def _action_create(a: dict[str, Any]) -> str:
     prompt, script = a["prompt"], a["script"]
     deliver = _normalize_deliver_param(a["deliver"])
@@ -738,8 +764,7 @@ def _action_create(a: dict[str, Any]) -> str:
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
     except CronSchedulerRegistrationError as exc:
-        _partial = exc.to_dict()
-        return tool_error(_partial.pop("error"), success=False, **_partial)
+        return _unregistered_create_result(exc)
     _create_message = " ".join(filter(None, (f"Cron job '{job['name']}' created.",
         "Created PAUSED — resume to schedule, or explicitly run now." if not job.get("enabled", True) else None,
         _local_delivery_notice(job, deliver))))

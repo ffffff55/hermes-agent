@@ -807,6 +807,39 @@ def _print_job_details(job_data: dict[str, Any]) -> None:
             print(template.format(job_data[key]))
 
 
+def _job_kept_pending_registration(result: dict) -> bool:
+    """The job is in the store; only its first external registration failed.
+
+    The tool leaves ``success`` false so a model does not treat the remote
+    scheduler as armed. That flag is not a missing job: exiting 1 here makes
+    people re-run create and store a duplicate.
+    """
+    return result.get("job_saved") is True and result.get("scheduler_registered") is False
+
+
+def _registration_pending_text(result: dict) -> str:
+    """Human line for a saved-but-unregistered create (``user_message`` first)."""
+    text = result.get("user_message") or result.get("error")
+    if text:
+        return str(text)
+    return (
+        "Saved the cron job, but couldn't register it with the external "
+        "scheduler yet. The job is kept — don't re-create it."
+    )
+
+
+def _print_created_job(result: dict) -> None:
+    print(color(f"Created job: {result['job_id']}", Colors.GREEN))
+    print(f"  Name: {result['name']}\n  Schedule: {result['schedule']}")
+    if result.get("skills"):
+        print(f"  Skills: {', '.join(result['skills'])}")
+    _print_job_details(result.get("job") or {})
+    if not (result.get("job") or {}).get("enabled", True):
+        print("  Created PAUSED — resume to schedule, or explicitly run now.")
+    else:
+        print(f"  Next run: {result['next_run_at']}")
+
+
 def cron_create(args):
     # The gateway-lifecycle guard lives in cron.jobs.create_job (every creation path); a block
     # surfaces as result["error"].
@@ -818,18 +851,17 @@ def cron_create(args):
         **({"paused": args.paused, "paused_reason": getattr(args, "paused_reason", None)}
            if getattr(args, "paused", False) or getattr(args, "paused_reason", None) is not None else {}),
         **_job_api_kwargs(args))
-    if not result.get("success"):
+    pending = _job_kept_pending_registration(result)
+    if not result.get("success") and not pending:
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
-    print(color(f"Created job: {result['job_id']}", Colors.GREEN))
-    print(f"  Name: {result['name']}\n  Schedule: {result['schedule']}")
-    if result.get("skills"):
-        print(f"  Skills: {', '.join(result['skills'])}")
-    _print_job_details(result.get("job", {}))
-    if not result.get("job", {}).get("enabled", True):
-        print("  Created PAUSED — resume to schedule, or explicitly run now.")
+    # A payload from before ``user_message`` / the job view only has job_id.
+    if pending and "name" not in result:
+        print(color(f"Created job: {result.get('job_id', '?')}", Colors.GREEN))
     else:
-        print(f"  Next run: {result['next_run_at']}")
+        _print_created_job(result)
+    if pending:
+        print(color(f"  ⚠  {_registration_pending_text(result)}", Colors.YELLOW))
     _warn_if_gateway_not_running()
     return 0
 

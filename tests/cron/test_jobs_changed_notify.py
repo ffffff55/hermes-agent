@@ -131,3 +131,11 @@ def test_tool_create_reports_partial_registration_failure(
     assert out["retry_create"] is False
     assert out["job_id"]
     assert "private callback URL and token" not in out["error"]
+    # CLI surfaces print user_message, not the raw exception (no class name).
+    assert out["user_message"]
+    assert "RuntimeError" not in out["user_message"]
+    assert "don't re-create" in out["user_message"]
+    assert "'w'" in out["user_message"]
+    assert "private callback URL and token" not in out["user_message"]
+    assert out["name"] == "w"
+    assert out["schedule"]

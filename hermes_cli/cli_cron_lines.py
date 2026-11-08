@@ -131,12 +131,24 @@ def _add_lines(subcommand: str, opts: dict) -> list[str]:
     result = _cron(
         action="create", schedule=schedule, prompt=prompt or None, name=opts["name"],
         deliver=opts["deliver"], repeat=opts["repeat"], skills=skills or None)
-    if not result.get("success"):
+    from hermes_cli.cron import _job_kept_pending_registration
+    pending = _job_kept_pending_registration(result)
+    # Same partial failure as ``hermes cron create``: the job is kept, so this
+    # must not read as "Failed to create job" (that headline makes people add
+    # a duplicate).
+    if not result.get("success") and not pending:
         return [_t("cron.create_failed", error=result.get("error"))]
-    out = [_t("cron.created", job_id=result["job_id"]), f"  {_t('cron.schedule', schedule=result['schedule'])}"]
+    out = [_t("cron.created", job_id=result.get("job_id", "?"))]
+    if result.get("schedule") is not None:
+        out.append(f"  {_t('cron.schedule', schedule=result['schedule'])}")
     if result.get("skills"):
         out.append(f"  {_t('cron.skills', skills=', '.join(result['skills']))}")
-    return [*out, f"  {_t('cron.next_run', value=result['next_run_at'])}"]
+    if "next_run_at" in result:
+        out.append(f"  {_t('cron.next_run', value=result['next_run_at'])}")
+    if pending:
+        from hermes_cli.cron import _registration_pending_text
+        out.append(f"  {_registration_pending_text(result)}")
+    return out
 
 
 def _edit_lines(subcommand: str, opts: dict) -> list[str]:
