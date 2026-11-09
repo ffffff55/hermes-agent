@@ -509,9 +509,14 @@ def _connected_summary(names, *, lazy_tools: int = 0,
                        lazy_servers: int = 0) -> tuple[int, int, list[tuple[str, str]]]:
     """(tool count, connected count, ``[(failed name, reason)]``) for candidate names, plus lazy
     servers. The reason is the recorded connect error; a candidate this pass never attempted (still
-    inside its retry cooldown from an earlier failure) has none."""
+    inside its retry cooldown from an earlier failure) has none. A name whose live
+    connection this scope adopted from another profile counts as connected."""
     with _core._lock:
-        keys = {n: _server_key(n) for n in names}
+        # Adoption leaves the task under the owner's key and records this scope
+        # in ``_server_tool_scopes``. A current-scope key miss is not a cooldown
+        # skip: resolve the shared connection the way candidate selection does.
+        scope = _core._mcp_registry_scope()
+        keys = {n: _resolve_server_key(n, scope, current=False) for n in names}
         connected = [n for n in names
                      if keys[n] in _core._servers and keys[n] not in _core._server_connect_errors]
         tool_count = sum(len(getattr(_core._servers[keys[n]], "_registered_tool_names", [])) for n in connected)

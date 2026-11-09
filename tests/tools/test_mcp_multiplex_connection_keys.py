@@ -426,3 +426,51 @@ def test_adopter_scope_setup_failure_leaks_no_override_and_continues(two_profile
     assert get_hermes_home_override() is None
     assert ss.current_secret_scope() is None
     assert registered == [{"x": {"url": "https://mcp.example/x"}}]
+
+
+def test_summary_counts_adopted_shared_connection_as_connected(two_profiles, caplog):
+    """Regression for #152216: a profile that adopted another profile's live MCP
+    connection must not see that server as a retry-cooldown failure.
+
+    Adoption leaves the task under the owner's key and records this scope in
+    ``_server_tool_scopes``. The startup summary has to count that name as
+    connected. A name this scope never connected still carries the cooldown reason.
+    """
+    import logging
+
+    import tools.mcp_tool as core
+    from tools import mcp_tool_discovery as disc
+    from tools import mcp_tool_registration as reg
+
+    cfg = {
+        "url": "https://mcp.example/x",
+        "headers": {"Authorization": "Bearer shared"},
+    }
+    two_profiles("a")
+    srv = _server("x", cfg)
+    disc._adopt_server("x", srv)
+    srv._registered_tool_names = reg._register_server_tools("x", srv, cfg)
+
+    scope_b = two_profiles("b")
+    assert reg.register_connected_into_current_scope({"x": dict(cfg)}) == 1
+    owner_key = next(
+        key for key in core._servers if isinstance(key, tuple) and key[1] == "x"
+    )
+    assert owner_key != (scope_b, "x")
+    assert scope_b in core._server_tool_scopes[owner_key]
+    assert (scope_b, "x") not in core._servers
+
+    tool_count, connected, failed = disc._connected_summary(["x", "cooled"])
+    assert connected == 1
+    assert tool_count == len(srv._registered_tool_names) >= 1
+    assert failed == [("cooled", "not attempted (in retry cooldown)")]
+
+    with caplog.at_level(logging.INFO, logger="tools.mcp_tool"):
+        disc._log_summary("  MCP:", ["x", "cooled"])
+    summaries = [
+        r.getMessage() for r in caplog.records if "tool(s) from" in r.getMessage()
+    ]
+    assert len(summaries) == 1, summaries
+    assert "from 1 server(s)" in summaries[0]
+    assert "cooled (not attempted (in retry cooldown))" in summaries[0]
+    assert "x (" not in summaries[0]
