@@ -1,5 +1,6 @@
 """Transport-only cron execution; output/delivery remain with the firing scheduler."""
 import asyncio
+import contextlib
 import hashlib
 import json
 import uuid
@@ -146,6 +147,45 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
         error = f'{type(exc).__name__}: {exc}'
         return False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error
 
+
+@contextlib.contextmanager
+def _admission_secret_scope(journal):
+    """Bind the admission's owning profile secret scope for one recovered delivery.
+
+    The ticker's home scope does not install secrets; the job-run path does
+    (``_install_fire_secret_scope``). Recovery runs the same delivery code, and
+    on a multiplexed gateway an unscoped ``get_secret`` (the Slack home channel,
+    and every other home-channel env) raises and leaves the admission to be
+    retried every tick. The path is ``<home>/cron/admissions/<id>.json``.
+    """
+    from agent.secret_scope import (
+        reset_multiplex_context, reset_secret_scope, set_multiplex_context, set_secret_scope)
+    from cron.scheduler_provider import routed_profile_fire
+    from hermes_cli.env_loader import hydrate_profile_secret_sources
+    from tui_gateway.launch_profile_policy import owner_secret_scope
+
+    home = journal.parents[2]
+    hydrate_profile_secret_sources(home)
+    scope_token = set_secret_scope(owner_secret_scope(home), profile_home=str(home))
+    context_token = set_multiplex_context(True) if routed_profile_fire(home) else None
+    try:
+        yield
+    finally:
+        if context_token is not None:
+            reset_multiplex_context(context_token)
+        reset_secret_scope(scope_token)
+
+
+def _consume_admission_for_missing_job(job_id, journal):
+    """Nothing remains to deliver or book once the job record is gone. Consuming
+    the admission stops the ticker from logging a traceback for it on every tick."""
+    import logging
+    logging.getLogger(__name__).warning(
+        'Cron receipt recovery stopped: job %s no longer exists; consuming %s',
+        job_id, journal)
+    journal.unlink(missing_ok=True)
+
+
 def reconcile_pending(*, allow_connect=True):
     """Observe prepared fires; never submit missing or interrupted work.
 
@@ -179,6 +219,10 @@ def reconcile_pending(*, allow_connect=True):
                 # The firer booked this attempt's terminal outcome itself (ownership lost, shutdown
                 # interrupt, a crashed tail): the receipt is not a result to save or deliver again.
                 journal.unlink(missing_ok=True)
+                continue
+            if get_job(params['job_id']) is None:
+                # No record left to deliver or book. Keeping the admission retries it every tick.
+                _consume_admission_for_missing_job(params['job_id'], journal)
                 continue
             if 'refusal' in record:
                 state = {'status': 'terminal', 'result': record['refusal'], 'job': record['job']}
@@ -221,8 +265,9 @@ def reconcile_pending(*, allow_connect=True):
             # The canonical receipt supplies the result; a dead scheduler's fire claim does not
             # authorize replay and must not prevent finishing its durable bookkeeping.
             fence = _FireOwnership(dict(job, fire_claim=None))
-            _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
-                                 verbose=False, execution_token=None)
+            with _admission_secret_scope(journal):
+                _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
+                                     verbose=False, execution_token=None)
             fail_empty_response(delivery, answer)
             if finish_completed_run(delivery, None, params['request_id'], recovered=True):
                 _lift_pause(params['job_id'], record.get('pause_recorded'))
