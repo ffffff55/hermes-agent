@@ -113,15 +113,17 @@ def _get_real_hermes_home() -> str | None:
 
 
 def _hermes_exempt_homes() -> tuple[str, ...]:
-    """Realpaths of the Hermes home tree(s) the protected-instruction gate must stay out of:
+    """Realpaths of the Hermes home tree(s) the project-local ``.hermes`` rule must stay out of:
     the ACTIVE profile's home, plus the Hermes ROOT when that home is a named profile
     (``<root>/profiles/<name>``). Exempting only the profile dir left the root's DIRECT files
-    (LEDGER.md / MEMORY.md / SOUL.md / AGENTS.md ...) to the ``.hermes`` component rule, which
+    (LEDGER.md / MEMORY.md / USER.md / AGENTS.md ...) to the ``.hermes`` component rule, which
     gated them like a project-local ``<repo>/.hermes/config.yaml`` — fail-closed headless
     (#110630). They are the agent's own store, governed by their own guards, exactly like
-    ``~/.hermes`` under the default profile. The root is added only when the shape really is a
-    named profile (``named_profile_home``), so a coincidental ``profiles/`` dir elsewhere never
-    exempts its parent; the home comes from the ACTIVE scope, never ``HERMES_HOME`` alone."""
+    ``~/.hermes`` under the default profile. ``SOUL.md`` is not store: the reason function
+    matches it before this exemption, because Hermes loads that file from these homes.
+    The root is added only when the shape really is a named profile (``named_profile_home``),
+    so a coincidental ``profiles/`` dir elsewhere never exempts its parent; the home comes
+    from the ACTIVE scope, never ``HERMES_HOME`` alone."""
     home = _get_real_hermes_home()
     if not home:
         return ()
@@ -192,6 +194,14 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
 _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
     "agents.md", "claude.md", "soul.md", ".cursorrules"})
 
+# Instruction basenames Hermes loads from HERMES_HOME or a profile home, rather than
+# from the session cwd. ``load_soul_md`` reads ``<home>/SOUL.md`` as identity slot 1
+# of every session, including cron. AGENTS.md / CLAUDE.md / .cursorrules are cwd
+# project files (``discover_context_files``); cron loads them only when a workdir is
+# set, and never by looking in the home. Those names stay on the home exemption so a
+# root AGENTS.md is not treated as project-local ``.hermes`` config (#110630).
+_HOME_LOADED_INSTRUCTION_BASENAMES = frozenset({"soul.md"})
+
 
 def _protected_instruction_config() -> tuple[bool, list[str]]:
     """Return ``(enabled, extra_patterns)`` from ``security.protected_instruction_files`` /
@@ -232,11 +242,19 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
     except (OSError, ValueError, RuntimeError):
         resolved = os.path.realpath(normalized)
 
-    # ~/.hermes itself is governed by its own guards (config.yaml hard-block,
-    # mirror guard, write_approval); this gate targets PROJECT-LOCAL files only.
-    # Must run before the ``.hermes`` component rule, which would match the home.
-    # ``_hermes_exempt_homes`` also covers the ROOT when the active home is a named
-    # profile, so ~/.hermes/<file> cannot read as project-local ``.hermes`` config.
+    # Identity files Hermes loads from a home (SOUL.md) are a persistence target
+    # even when they live under HERMES_HOME or ``<root>/profiles/<name>``. Match
+    # them on both the input and the realpath before the store exemption, so a
+    # symlink either direction cannot hide ``<home>/SOUL.md`` (#152128, #41351).
+    for candidate in (normalized, resolved):
+        base = os.path.basename(candidate)
+        if base.lower() in _HOME_LOADED_INSTRUCTION_BASENAMES:
+            return base
+
+    # The rest of the home tree is the agent's store (MEMORY.md, USER.md, state,
+    # config). This gate stays out of it. The exemption also stops the ``.hermes``
+    # component rule below from reading ~/.hermes/<file> as project-local config,
+    # including the ROOT when the active home is a named profile (#110630).
     for real_home in _hermes_exempt_homes():
         if resolved == real_home or resolved.startswith(real_home + os.sep):
             return None

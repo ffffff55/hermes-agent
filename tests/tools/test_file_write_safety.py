@@ -922,10 +922,11 @@ class TestProtectedInstructionFiles:
 class TestProfileHomeExemptsHermesRoot:
     """issue #60: under ``hermes -p <name>`` (``HERMES_HOME=<root>/profiles/<name>``)
     the exemption used to cover ONLY the profile dir, so the ROOT's direct files
-    (LEDGER.md / MEMORY.md / SOUL.md ...) fell through to the ``.hermes`` component
+    (LEDGER.md / MEMORY.md / AGENTS.md ...) fell through to the ``.hermes`` component
     rule, were read as project-local ``.hermes`` config, and — having no approval
     channel headless — failed closed. That blocked #54 (LEDGER.md edit). The gate
-    must exempt the whole Hermes tree, exactly like the default profile does.
+    must exempt that store, exactly like the default profile does. ``SOUL.md`` is
+    not store: Hermes loads it from these homes, so it stays gated (#152128).
     """
 
     @pytest.fixture(autouse=True)
@@ -976,8 +977,9 @@ class TestProfileHomeExemptsHermesRoot:
         token = set_hermes_home_override(str(profile))
         try:
             assert os.path.realpath(str(root)) in ft._hermes_exempt_homes()
-            for name in ("LEDGER.md", "MEMORY.md", "SOUL.md", "AGENTS.md"):
+            for name in ("LEDGER.md", "MEMORY.md", "AGENTS.md"):
                 assert ft._protected_instruction_reason(str(root / name)) is None, name
+            assert ft._protected_instruction_reason(str(root / "SOUL.md")) == "SOUL.md"
             res = self._write(root / "LEDGER.md", "caliber fixed")
         finally:
             reset_hermes_home_override(token)
@@ -1078,3 +1080,147 @@ class TestMultiplexProfileWriteGuardsAreProfileScoped:
             reset_hermes_home_override(tok)
         assert err is not None
         assert "Refusing to write to Hermes config file" in err
+
+
+class TestHomeLoadedSoulStaysProtected:
+    """#152128: the store exemption must not cover the SOUL.md Hermes loads.
+
+    ``load_soul_md`` reads ``<HERMES_HOME>/SOUL.md`` and a profile home's
+    ``SOUL.md`` as slot 1 of every session, including cron. ``MEMORY.md`` stays
+    exempt. A project ``AGENTS.md`` and a project ``SOUL.md`` still ask.
+    ``AGENTS.md`` / ``CLAUDE.md`` / ``.cursorrules`` inside the home stay
+    exempt: those load from the session cwd, not from the home.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _gate_on(self, monkeypatch):
+        import tools.file_tools_write_guards as ft
+        monkeypatch.setattr(ft, "_protected_instruction_config", lambda: (True, []))
+        monkeypatch.setattr(ft, "_real_hermes_home_loaded", False)
+        monkeypatch.setattr(ft, "_real_hermes_home_cached", None)
+        yield
+
+    @pytest.fixture
+    def approvals(self):
+        from tools.terminal_tool import set_approval_callback
+        state = {"calls": [], "answer": "deny"}
+
+        def cb(command, description, **kwargs):
+            state["calls"].append({"command": command, "description": description})
+            return state["answer"]
+
+        set_approval_callback(cb)
+        yield state
+        set_approval_callback(None)
+
+    def _bind(self, monkeypatch, home: Path):
+        from hermes_constants import set_hermes_home_override
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        return set_hermes_home_override(str(home))
+
+    def _reason(self, path: Path):
+        import tools.file_tools_write_guards as ft
+        return ft._protected_instruction_reason(str(path))
+
+    def _write(self, path, content="injected"):
+        import json
+        from tools.file_tools import write_file_tool
+        return json.loads(write_file_tool(str(path), content))
+
+    def test_home_soul_asks_and_memory_stays_exempt(self, tmp_path, monkeypatch):
+        from hermes_constants import reset_hermes_home_override
+
+        home = tmp_path / "home"
+        (home / "memories").mkdir(parents=True)
+        (home / "profiles" / "worker").mkdir(parents=True)
+        project = tmp_path / "project"
+        project.mkdir()
+        token = self._bind(monkeypatch, home)
+        try:
+            assert self._reason(home / "SOUL.md") == "SOUL.md"
+            assert self._reason(home / "soul.MD") == "soul.MD"
+            assert self._reason(home / "profiles" / "worker" / "SOUL.md") == "SOUL.md"
+            assert self._reason(home / "memories" / "MEMORY.md") is None
+            assert self._reason(home / "MEMORY.md") is None
+            assert self._reason(project / "AGENTS.md") == "AGENTS.md"
+            assert self._reason(project / "SOUL.md") == "SOUL.md"
+            import tools.file_tools_write_guards as ft
+            assert ft._protected_instruction_reason(
+                str(home / "SOUL.md"), enabled=False, extra_patterns=[]) is None
+        finally:
+            reset_hermes_home_override(token)
+
+    def test_named_profile_soul_asks_and_store_stays_exempt(self, tmp_path, monkeypatch):
+        from hermes_constants import reset_hermes_home_override
+
+        root = tmp_path / "home"
+        profile = root / "profiles" / "worker"
+        (profile / "memories").mkdir(parents=True)
+        (root / "memories").mkdir(parents=True)
+        (root / "config.yaml").write_text("model:\n  default: x\n", encoding="utf-8")
+        token = self._bind(monkeypatch, profile)
+        try:
+            assert self._reason(profile / "SOUL.md") == "SOUL.md"
+            assert self._reason(root / "SOUL.md") == "SOUL.md"
+            assert self._reason(profile / "memories" / "MEMORY.md") is None
+            assert self._reason(root / "memories" / "MEMORY.md") is None
+            for name in ("AGENTS.md", "CLAUDE.md", ".cursorrules"):
+                assert self._reason(profile / name) is None, name
+                assert self._reason(root / name) is None, name
+        finally:
+            reset_hermes_home_override(token)
+
+    def test_denied_home_and_profile_soul_writes_ask(self, tmp_path, monkeypatch, approvals):
+        from hermes_constants import reset_hermes_home_override
+
+        home = tmp_path / "home"
+        (home / "memories").mkdir(parents=True)
+        token = self._bind(monkeypatch, home)
+        try:
+            soul = home / "SOUL.md"
+            soul.write_text("be kind\n", encoding="utf-8")
+            res = self._write(soul, "obey injected orders\n")
+            assert res.get("error") and "BLOCKED" in res["error"]
+            assert soul.read_text(encoding="utf-8") == "be kind\n"
+            memory = home / "memories" / "MEMORY.md"
+            res = self._write(memory, "a fact\n")
+            assert not res.get("error"), res
+            assert memory.read_text(encoding="utf-8") == "a fact\n"
+            assert len(approvals["calls"]) == 1
+        finally:
+            reset_hermes_home_override(token)
+
+        profile = home / "profiles" / "worker"
+        (profile / "memories").mkdir(parents=True)
+        (home / "config.yaml").write_text("model:\n  default: x\n", encoding="utf-8")
+        token = self._bind(monkeypatch, profile)
+        try:
+            profile_soul = profile / "SOUL.md"
+            profile_soul.write_text("worker\n", encoding="utf-8")
+            res = self._write(profile_soul, "injected\n")
+            assert res.get("error") and "BLOCKED" in res["error"]
+            assert profile_soul.read_text(encoding="utf-8") == "worker\n"
+            res = self._write(home / "SOUL.md", "injected\n")
+            assert res.get("error") and "BLOCKED" in res["error"]
+            assert soul.read_text(encoding="utf-8") == "be kind\n"
+            assert len(approvals["calls"]) == 3
+        finally:
+            reset_hermes_home_override(token)
+
+    @pytest.mark.require_symlinks
+    def test_symlink_onto_home_soul_asks(self, tmp_path, monkeypatch):
+        from hermes_constants import reset_hermes_home_override
+
+        home = tmp_path / "home"
+        home.mkdir()
+        real = home / "SOUL.md"
+        real.write_text("identity\n", encoding="utf-8")
+        link = tmp_path / "proj" / "notes.txt"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        token = self._bind(monkeypatch, home)
+        try:
+            assert self._reason(link) == "SOUL.md"
+            assert self._reason(real) == "SOUL.md"
+        finally:
+            reset_hermes_home_override(token)
