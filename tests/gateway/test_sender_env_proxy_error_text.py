@@ -240,6 +240,24 @@ def test_an_oddly_cased_no_proxy_alone_is_not_a_bypass(monkeypatch):
     assert env_proxy_for_redaction("https://chat.googleapis.com") is None
 
 
+@pytest.mark.parametrize("proxy, expected", [
+    ("proxy:3128", None),
+    ("proxy.corp:3128", None),
+    ("127.0.0.1:9", None),
+    ("bob:pw@proxy:3128", "RuntimeError via <unparseable URL redacted>"),
+    ("u:p@host:1", "RuntimeError via <unparseable URL redacted>"),
+    ("http://bob:pw@proxy:3128", "RuntimeError via http://proxy:3128"),
+])
+def test_bare_host_port_proxy_keeps_its_error_text(proxy, expected):
+    # httpx and requests read a bare host:port as http, so a secret-free value
+    # keeps its error text. Userinfo still fails the authority check.
+    # Regression for NousResearch/hermes-agent#151811.
+    from gateway.platforms.base_log_safety import describe_proxy_error
+
+    shown = describe_proxy_error(RuntimeError("All connection attempts failed"), proxy)
+    assert shown == expected
+
+
 def test_feishu_media_download_failure_log_carries_no_proxy_secret(monkeypatch, caplog):
     from gateway.config import PlatformConfig
     from gateway.platforms.base import SendResult as _SendResult

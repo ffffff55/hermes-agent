@@ -173,8 +173,12 @@ def _bypasses(no_proxy: str, host: str | None, netloc: str) -> bool:
 
 
 def _shown_in_full(proxy: str) -> bool:
-    """True when rendering prints all of ``proxy`` (lowercased scheme and host, integer port):
-    ``HTTP://Proxy:03128`` holds nothing ``http://proxy:3128`` leaves out."""
-    m = _BARE_AUTHORITY.fullmatch(proxy)
+    """True when the proxy holds nothing rendering leaves out (lowercased scheme and host,
+    integer port): ``HTTP://Proxy:03128`` holds nothing ``http://proxy:3128`` leaves out.
+    A value with no ``://`` is judged as the http URL httpx and requests already default it to."""
+    # ``_proxy_scheme`` and ``_no_proxy_bypasses_all`` already treat a bare host:port as http.
+    # Userinfo (``bob:pw@proxy``) still fails ``_BARE_AUTHORITY`` and stays redacted.
+    as_url = proxy if "://" in proxy else f"http://{proxy}"
+    m = _BARE_AUTHORITY.fullmatch(as_url)
     canonical = m and f"{m[1].lower()}://{m[2].lower()}" + (f":{int(m[3])}" if m[3] else "")
-    return bool(canonical) and safe_proxy_url_for_log(proxy, max_len=len(proxy) + 64) == canonical
+    return bool(canonical) and safe_proxy_url_for_log(as_url, max_len=len(as_url) + 64) == canonical
