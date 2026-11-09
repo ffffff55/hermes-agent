@@ -265,6 +265,37 @@ def test_prefetch_runs_for_substantive_user_message():
     assert ctx.ext_prefetch_cache == "REMEMBERED CONTEXT"
 
 
+def test_multimodal_memory_notes_do_not_mutate_the_caller_list():
+    """Regression for NousResearch/hermes-agent#151826.
+
+    Prefetch is appended as a durable text part on the live turn row (model,
+    persist, and replay). That append must not mutate the caller's list:
+    ``original_user_message`` aliases it, and memory sync reads that alias.
+    """
+    agent, _mm = _agent_with_memory_manager()
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    content = [{"type": "text", "text": "what is in this screenshot"}, image]
+
+    ctx = _build(
+        agent,
+        user_message=content,
+        summarize_user_message_for_log=lambda message: str(message),
+    )
+
+    assert content == [
+        {"type": "text", "text": "what is in this screenshot"},
+        image,
+    ]
+    assert ctx.original_user_message is content
+    turn = ctx.messages[ctx.current_turn_user_idx]
+    assert turn["content"] is not content
+    assert turn["content"][:2] == content
+    injected = turn["content"][-1]
+    assert injected["type"] == "text"
+    assert "<memory-context>" in injected["text"]
+    assert "REMEMBERED CONTEXT" in injected["text"]
+
+
 # ── Per-turn author ──────────────────────────────────────────────────────────
 
 

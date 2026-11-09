@@ -727,6 +727,16 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
             scrubber.reset()
 
 
+def _content_for_turn_message(user_message: Any) -> Any:
+    """Copy list content so in-place injection cannot mutate the caller's list.
+
+    ``original_user_message`` aliases that list (or the persist override, which is
+    often the same object). String content is unchanged: the sidecar writes
+    ``api_content`` and does not append onto ``content``.
+    """
+    return list(user_message) if isinstance(user_message, list) else user_message
+
+
 def _stage_turn_user_message(
     agent: Any, user_message: Any, persist_user_message: Any,
     persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
@@ -740,6 +750,7 @@ def _stage_turn_user_message(
     expected_persist_content = (
         persist_user_message if persist_user_message is not None else user_message
     )
+    turn_content = _content_for_turn_message(user_message)
     if (
         isinstance(pending_cli_message, dict)
         and pending_cli_message.get("content") == expected_persist_content
@@ -747,9 +758,9 @@ def _stage_turn_user_message(
         user_msg = pending_cli_message
         # CLI-staged value is the clean text; restore the API-facing variant (e.g. voice
         # prefix) on the same dict, keeping any close-path durable marker.
-        user_msg["content"] = user_message
+        user_msg["content"] = turn_content
     else:
-        user_msg = {"role": "user", "content": user_message}
+        user_msg = {"role": "user", "content": turn_content}
         if isinstance(pending_cli_message, dict):
             agent._pending_cli_user_message = None
     # CLI input is stamped when staged; gateway input may carry the platform event

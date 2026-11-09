@@ -112,3 +112,47 @@ def test_on_turn_start_scrubs_user_text_but_hands_identity_through_raw():
     message, kwargs = provider.seen[0]
     assert message == "next ask" and _SECRET not in kwargs["previous_message"]
     assert kwargs["author_id"] == phone and kwargs["author_name"] == phone and kwargs["model"] == "test/model"
+
+
+def test_sync_all_strips_injected_memory_context_from_a_multimodal_turn():
+    """Regression for NousResearch/hermes-agent#151826.
+
+    An image turn appends the recall fence as a durable text part on the live
+    user row. Providers must not archive that fence (they would re-extract it
+    next turn). The conversation list the model sees stays intact.
+    """
+    from agent.memory_context import build_memory_context_block
+
+    fence = build_memory_context_block("user likes oat milk")
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    messages = [
+        {"role": "user", "content": f"earlier ask\n{fence}"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is in this screenshot"},
+                image,
+                {"type": "text", "text": fence},
+            ],
+        },
+        {"role": "assistant", "content": "a cat on a chair"},
+    ]
+    user_content = f"what is in this screenshot\n{fence}"
+    mgr, provider = _manager()
+    mgr.sync_all(user_content, "a cat on a chair", messages=messages)
+    mgr.flush_pending(timeout=5.0)
+
+    seen_user, seen_assistant, seen_messages = provider.seen[0]
+    assert "what is in this screenshot" in seen_user
+    assert "user likes oat milk" not in seen_user
+    assert "<memory-context>" not in seen_user.lower()
+    assert seen_assistant == "a cat on a chair"
+    payload = repr(seen_messages)
+    assert "what is in this screenshot" in payload and "earlier ask" in payload
+    assert "user likes oat milk" not in payload
+    assert "<memory-context>" not in payload.lower()
+    assert repr(image) in payload
+    # Live rows still carry the durable part the model, persist, and replay use.
+    assert messages[0]["content"].endswith(fence)
+    assert messages[1]["content"][2]["text"] == fence
+    assert "user likes oat milk" in user_content

@@ -142,6 +142,68 @@ def _redact_messages_for_egress(messages: Optional[list[Any]]) -> Optional[list[
     return None if messages is None else list(_redact_for_provider(without_withheld_prompts(messages)))
 
 
+def _sanitize_provider_text(value: Any) -> Any:
+    """Strip injected recall fences from one string. Non-strings pass through."""
+    if not isinstance(value, str) or not value:
+        return value
+    return sanitize_context(value)
+
+
+def _sanitize_message_content(content: Any) -> Any:
+    """Copy of ``content`` with recall fences removed from its text. The input is not mutated.
+
+    String content is the message's text. List content keeps image parts and sanitizes
+    text parts (and bare string parts). Unchanged content is returned as-is.
+    """
+    if isinstance(content, str):
+        cleaned = _sanitize_provider_text(content)
+        return content if cleaned == content else cleaned
+    if not isinstance(content, list):
+        return content
+    parts: list[Any] = []
+    changed = False
+    for part in content:
+        if isinstance(part, str):
+            cleaned = _sanitize_provider_text(part)
+            if cleaned != part:
+                part = cleaned
+                changed = True
+        elif (
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ):
+            cleaned = _sanitize_provider_text(part["text"])
+            if cleaned != part["text"]:
+                part = {**part, "text": cleaned}
+                changed = True
+        parts.append(part)
+    return parts if changed else content
+
+
+def _sanitize_messages_for_provider(messages: Optional[list[Any]]) -> Optional[list[Any]]:
+    """Copies of ``messages`` whose text no longer carries an injected recall block.
+
+    The conversation loop's list is not rewritten: only a message whose text changed
+    is shallow-copied, and only for the provider hand-off.
+    """
+    if not messages:
+        return messages
+    out: list[Any] = []
+    changed = False
+    for message in messages:
+        if not isinstance(message, dict) or "content" not in message:
+            out.append(message)
+            continue
+        content = _sanitize_message_content(message.get("content"))
+        if content is message.get("content"):
+            out.append(message)
+            continue
+        changed = True
+        out.append({**message, "content": content})
+    return out if changed else messages
+
+
 class _StuckCallGate:
     """Process-wide admission for one kind of external provider call, keyed by (Hermes home, provider).
 
@@ -467,7 +529,10 @@ class MemoryManager:
 
         Everything forwarded is provider egress: turn strings AND the ``messages`` transcript slice
         (tool outputs included) go through ``_redact_for_provider`` so secrets are never archived
-        verbatim in a provider's store (#115104).
+        verbatim in a provider's store (#115104). Injected ``<memory-context>`` blocks are then
+        stripped from the user text and from each message's text, on copies — an image turn
+        appends that block onto the live content list for the model, and providers must not
+        re-retain it (#151826). The conversation itself is not rewritten.
         """
         if self._fork_turn_hooks_suppressed():
             return
@@ -477,6 +542,10 @@ class MemoryManager:
             return
         clean_user_content, assistant_content, redacted_messages = _redact_for_provider(
             clean_user_content, assistant_content, messages)
+        clean_user_content = _sanitize_provider_text(clean_user_content)
+        if not clean_user_content:
+            return
+        redacted_messages = _sanitize_messages_for_provider(redacted_messages)
         optional_kwargs = {"messages": redacted_messages, "turn_author": turn_author}
 
         def _sync(provider: MemoryProvider) -> None:
