@@ -989,10 +989,30 @@ def route_launch_key(authority, policy, config):
     return launch_key(authority, policy)
 
 
+def _adopt_known_policy_fields(data):
+    """Keep the keys this build's ``LocalSessionPolicy`` defines.
+
+    A receipt crosses a release boundary. A field the other build stored and this
+    dataclass does not define (added there, or since removed) is not a store fault:
+    drop it and restore the intersection. Missing keys keep the dataclass default.
+    A non-mapping is returned unchanged so construction still fails the way
+    ``LocalSessionPolicy(**data)`` did, and the wire reason stays ``storage_unavailable``.
+    """
+    from collections.abc import Mapping
+    from dataclasses import fields
+    if not isinstance(data, Mapping):
+        return data
+    known = {field.name for field in fields(LocalSessionPolicy)}
+    return {key: value for key, value in data.items() if key in known}
+
+
 def restore_policy(data):
-    """Reject incomplete private policy rather than rebuilding from current defaults."""
+    """Reject incomplete private policy rather than rebuilding from current defaults.
+
+    Keys this build does not define are adopted, not a reason to refuse the receipt.
+    """
     try:
-        policy = LocalSessionPolicy(**data)
+        policy = LocalSessionPolicy(**_adopt_known_policy_fields(data))
         from gateway.session_a2a import is_forward_policy
         surfaces = {**SURFACES, 'cron': 'cron', 'kanban': 'cli', 'bot_room': 'bot_room'}
         if ((not is_forward_policy(policy) and
