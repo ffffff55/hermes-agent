@@ -3,6 +3,9 @@
 Loopback HTTP + actual auth stores: the Codex read-only fetcher hits the entry's own route,
 parses real payloads, marks Opus/Sonnet windows model-scoped, and a 401 raises (never a
 rotation/refresh) — while the live fetcher's repair path stays intact.
+
+Anthropic OAuth utilization is already percent: a 1% window must stay 1, not become 100
+(#149828).
 """
 
 from __future__ import annotations
@@ -147,10 +150,10 @@ def test_anthropic_fetch_honors_explicit_api_key_and_marks_model_scoped_windows(
 
     def fake_get_json(url, headers, *, timeout):
         called["url"], called["headers"] = url, headers
-        return {"five_hour": {"utilization": 0.3, "resets_at": "2026-10-05T12:00:00Z"},
-                "seven_day": {"utilization": 0.2, "resets_at": "2026-10-08T12:00:00Z"},
-                "seven_day_opus": {"utilization": 1.0, "resets_at": "2026-10-09T12:00:00Z"},
-                "seven_day_sonnet": {"utilization": 0.4, "resets_at": "2026-10-09T12:00:00Z"}}
+        return {"five_hour": {"utilization": 30.0, "resets_at": "2026-10-05T12:00:00Z"},
+                "seven_day": {"utilization": 20.0, "resets_at": "2026-10-08T12:00:00Z"},
+                "seven_day_opus": {"utilization": 100.0, "resets_at": "2026-10-09T12:00:00Z"},
+                "seven_day_sonnet": {"utilization": 40.0, "resets_at": "2026-10-09T12:00:00Z"}}
 
     monkeypatch.setattr(account_usage, "_get_json", fake_get_json)
     monkeypatch.setattr(account_usage, "resolve_anthropic_token",
@@ -165,6 +168,33 @@ def test_anthropic_fetch_honors_explicit_api_key_and_marks_model_scoped_windows(
                       "Opus week": "model", "Sonnet week": "model"}
     percents = {w.label: w.used_percent for w in snapshot.windows}
     assert percents["Opus week"] == 100.0 and percents["Current session"] == 30.0
+
+
+def test_anthropic_utilization_is_already_percent_so_low_usage_is_not_scaled(
+    monkeypatch,
+):
+    """The OAuth usage endpoint answers in percent. 1.0 stays 1%, not 100% (#149828)."""
+
+    def fake_get_json(url, headers, *, timeout):
+        assert url == "https://api.anthropic.com/api/oauth/usage"
+        assert headers["Authorization"].startswith("Bearer ")
+        return {
+            "five_hour": {"utilization": 3.0, "resets_at": "2026-10-05T12:00:00Z"},
+            "seven_day": {"utilization": 1.0, "resets_at": "2026-10-08T12:00:00Z"},
+            "seven_day_opus": {"utilization": 0.5, "resets_at": "2026-10-09T12:00:00Z"},
+            "seven_day_sonnet": {"utilization": 0.0, "resets_at": "2026-10-09T12:00:00Z"},
+        }
+
+    monkeypatch.setattr(account_usage, "_get_json", fake_get_json)
+    snapshot = account_usage._fetch_anthropic_account_usage(api_key="sk-ant-oat-explicit-token")
+
+    assert snapshot is not None
+    assert {w.label: w.used_percent for w in snapshot.windows} == {
+        "Current session": 3.0,
+        "Current week": 1.0,
+        "Opus week": 0.5,
+        "Sonnet week": 0.0,
+    }
 
 
 def test_read_only_fetch_remembered_under_identity_slot(monkeypatch, tmp_path):
