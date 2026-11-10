@@ -669,6 +669,12 @@ def _filter_suspicious_mcp_servers(servers: dict[str, dict]) -> dict[str, dict]:
     return safe_servers
 
 
+# Names already warned for a same-name native clash or a rejected native entry.
+# Config loads repeat about once a minute; a native override is intended, so
+# one warning per process per name is enough. Cost carry still logs every time.
+_portable_conflict_warned: set[str] = set()
+
+
 def _portable_mcp_servers(safe_servers: dict[str, dict], rejected: frozenset[str] = frozenset()) -> None:
     """Merge plugin-provided (portable) MCP servers into *safe_servers*; native config wins on a clash. Never raises.
 
@@ -682,7 +688,9 @@ def _portable_mcp_servers(safe_servers: dict[str, dict], rejected: frozenset[str
         portable = get_plugin_manager().get_portable_mcp_servers()
         for name, cfg in _filter_suspicious_mcp_servers(portable).items():
             if name in rejected:  # the user's own entry for this name has a malformed budget: stay off
-                logger.warning("Portable MCP server '%s' skipped: the native entry of that name was rejected", name)
+                if name not in _portable_conflict_warned:
+                    _portable_conflict_warned.add(name)
+                    logger.warning("Portable MCP server '%s' skipped: the native entry of that name was rejected", name)
             elif name in safe_servers:
                 native = safe_servers[name]
                 carried = {k: cfg[k] for k in CONFIG_KEYS if k in cfg and k not in native}
@@ -690,7 +698,8 @@ def _portable_mcp_servers(safe_servers: dict[str, dict], rejected: frozenset[str
                     safe_servers[name] = {**native, **carried}
                     logger.warning("Portable MCP server '%s' conflicts with native config; using the native entry "
                                    "with the package's declared %s", name, ", ".join(carried))
-                else:
+                elif name not in _portable_conflict_warned:
+                    _portable_conflict_warned.add(name)
                     logger.warning("Portable MCP server '%s' conflicts with native config; skipping", name)
             else:
                 # Rendered like native entries: a raw ``${VAR}`` here reads as a changed definition
