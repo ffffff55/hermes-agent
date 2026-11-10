@@ -18,7 +18,7 @@ class _MissingAcp:
     def find_spec(self, fullname, path, target=None):
         if fullname == 'acp' or fullname.startswith('acp.'):
             raise ModuleNotFoundError("No module named 'acp'", name='acp')
-        return None
+        # Not our module: fall through (implicit None) so the next finder runs.
 
 
 def test_a_missing_acp_extra_is_a_named_store_refusal(monkeypatch):
